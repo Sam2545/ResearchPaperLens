@@ -22,3 +22,8 @@ class ResearchPaper:
     publication_year: int = 0
     venue: str = ""
     source_path: str = ""
+
+    # Reserved for a future summarization phase. Left empty for now; no
+    # summarization logic populates these yet.
+    summary: str = ""
+    key_insights: list[str] = field(default_factory=list)

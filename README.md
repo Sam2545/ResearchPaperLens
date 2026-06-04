@@ -19,6 +19,8 @@ RAG, or web deployment. Those capabilities are planned for later phases.
 - Guesses title and authors
 - Extracts abstract and keywords when present
 - Detects section headings
+- Reserves `summary` / `key_insights` fields, populated by an opt-in
+  (`--summarize`) placeholder summarizer (no LLM yet)
 - Saves structured results as JSON
 - Includes unit and integration tests
 
@@ -32,6 +34,7 @@ The pipeline is split into focused, independently testable modules:
 │   ├── paper.py        # ResearchPaper data model (dataclass)
 │   ├── pdf_reader.py   # PDF I/O: extract full text + page count
 │   ├── analyzer.py     # Pure analysis: text -> ResearchPaper fields
+│   ├── summarizer.py   # Placeholder summarizer: fills summary/key_insights
 │   └── storage.py      # Serialize ResearchPaper <-> JSON
 ├── data/               # Input PDFs
 ├── outputs/            # Generated JSON output (git-ignored)
@@ -74,9 +77,17 @@ python main.py path/to/paper.pdf
 
 # Choose an explicit output file
 python main.py path/to/paper.pdf -o results/paper.json
+
+# Run the (placeholder) summarizer to fill summary/key_insights before saving
+python main.py path/to/paper.pdf --summarize
 ```
 
 See all options with `python main.py --help`.
+
+> **Note:** `--summarize` currently uses a placeholder summarizer in
+> `src/summarizer.py` that leaves `summary`/`key_insights` empty. It wires up
+> the pipeline so a real summarization implementation can drop in later without
+> further changes. No LLM is used yet.
 
 You can also use the pieces directly in Python:
 
@@ -111,14 +122,17 @@ The output JSON mirrors the `ResearchPaper` dataclass. Example (abridged):
   "doi": "",
   "publication_year": 0,
   "venue": "",
-  "source_path": "data/AttentionIsAllYouNeed.pdf"
+  "source_path": "data/AttentionIsAllYouNeed.pdf",
+  "summary": "",
+  "key_insights": []
 }
 ```
 
 Currently derived: `title`, `authors`, `abstract`, `keywords`, `section_headings`,
 `page_count`, `word_count`, `full_text`, `source_path`. The remaining fields
 (`references`, `doi`, `publication_year`, `venue`) are reserved and left at their
-defaults for now.
+defaults for now. `summary` and `key_insights` are reserved for summarization and
+only populated when `--summarize` is passed (currently a no-op placeholder).
 
 ## Limitations
 

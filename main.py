@@ -8,6 +8,7 @@ from pathlib import Path
 from src.analyzer import analyze
 from src.pdf_reader import read_pdf
 from src.storage import save_paper
+from src.summarizer import summarize
 
 DEFAULT_PDF = Path("data/AttentionIsAllYouNeed.pdf")
 DEFAULT_OUTPUT_DIR = Path("outputs")
@@ -17,6 +18,7 @@ def process_pdf(
     pdf_path: str | Path,
     output_path: str | Path | None = None,
     output_dir: str | Path = DEFAULT_OUTPUT_DIR,
+    summarize_paper: bool = False,
 ) -> Path:
     """Read, analyze, and persist a PDF as JSON.
 
@@ -25,6 +27,10 @@ def process_pdf(
 
     If ``output_path`` is given it is used verbatim; otherwise the output is
     written to ``output_dir/<pdf-stem>.json``.
+
+    When ``summarize_paper`` is true, the (placeholder) summarizer runs after
+    analysis and before saving, populating the ``summary``/``key_insights``
+    fields on the stored paper.
     """
     pdf_path = Path(pdf_path)
     full_text, page_count = read_pdf(pdf_path)
@@ -33,6 +39,8 @@ def process_pdf(
         page_count=page_count,
         source_path=str(pdf_path),
     )
+    if summarize_paper:
+        paper = summarize(paper)
     if output_path is not None:
         resolved_output = Path(output_path)
     else:
@@ -57,12 +65,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Output JSON file path (default: outputs/<pdf-stem>.json)",
     )
+    parser.add_argument(
+        "--summarize",
+        action="store_true",
+        help="Run the summarizer to fill summary/key_insights before saving.",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
-    output_path = process_pdf(args.pdf, output_path=args.output)
+    output_path = process_pdf(
+        args.pdf,
+        output_path=args.output,
+        summarize_paper=args.summarize,
+    )
     print(f"Saved {args.pdf} -> {output_path}")
 
 
