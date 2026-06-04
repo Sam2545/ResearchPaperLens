@@ -4,6 +4,24 @@ A small, modular pipeline that reads a research-paper PDF, extracts structured
 metadata (title, authors, abstract, section headings, and more), and saves the
 result as clean JSON.
 
+## Current Phase
+
+ResearchPaperLens is currently in Phase 1. It focuses on extracting structured
+metadata from research-paper PDFs and saving the result as JSON.
+
+It does not currently perform LLM summarization, semantic search, embeddings,
+RAG, or web deployment. Those capabilities are planned for later phases.
+
+## Features
+
+- Extracts text from research-paper PDFs
+- Counts pages and words
+- Guesses title and authors
+- Extracts abstract and keywords when present
+- Detects section headings
+- Saves structured results as JSON
+- Includes unit and integration tests
+
 ## How it works
 
 The pipeline is split into focused, independently testable modules:
@@ -102,8 +120,16 @@ Currently derived: `title`, `authors`, `abstract`, `keywords`, `section_headings
 (`references`, `doi`, `publication_year`, `venue`) are reserved and left at their
 defaults for now.
 
-> Extraction is heuristic and tuned for common single-column paper layouts, so
-> results may vary on other formats.
+## Limitations
+
+- Extraction is heuristic and tuned for common single-column paper layouts, so
+  results may vary on other formats (e.g. multi-column or scanned PDFs).
+- Field detection relies on structural cues (capitalization, numbered headings,
+  superscript author markers), not semantic understanding, so it can miss or
+  misidentify fields in papers that deviate from those conventions.
+- Keywords are only extracted when the paper has an explicit `Keywords` /
+  `Index Terms` line; otherwise the field is left empty.
+- `references`, `doi`, `publication_year`, and `venue` are not yet extracted.
 
 ## Tests
 
