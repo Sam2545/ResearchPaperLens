@@ -80,6 +80,17 @@ def test_guess_title_returns_empty_when_absent():
     assert guess_title("abstract\nbody text only") == ""
 
 
+def test_guess_title_joins_wrapped_lines():
+    text = "A Multi Line Title\nThat Wraps Here\nJohn Smith1\nAbstract\nbody"
+    assert guess_title(text) == "A Multi Line Title That Wraps Here"
+
+
+def test_guess_title_stops_at_author_line():
+    # The author line (has a marker) must not be absorbed into the title.
+    text = "Real Title Line\nAuthor One∗ Author Two∗\nAbstract\nbody"
+    assert guess_title(text) == "Real Title Line"
+
+
 def test_guess_section_headings():
     assert guess_section_headings(SAMPLE_TEXT) == [
         "1 Introduction",
@@ -97,8 +108,33 @@ def test_guess_authors():
     assert guess_authors(SAMPLE_TEXT) == ["Jane Doe", "John Smith"]
 
 
+def test_guess_authors_comma_separated_with_affiliation_digits():
+    text = (
+        "A Paper Title\n"
+        "Jane Doe1, John Smith1, Mary Major2\n"
+        "1Example University 2Other Institute\n"
+        "Abstract\n"
+        "body"
+    )
+    assert guess_authors(text) == ["Jane Doe", "John Smith", "Mary Major"]
+
+
+def test_guess_authors_skips_affiliation_and_email_lines():
+    text = (
+        "A Paper Title\n"
+        "Jane Doe∗\n"
+        "Example University\n"
+        "jane@example.com\n"
+        "Abstract\n"
+        "body"
+    )
+    assert guess_authors(text) == ["Jane Doe"]
+
+
 def test_guess_authors_empty_without_markers():
-    assert guess_authors("Title Line\nNo Markers Here\nAbstract\nbody") == []
+    # A plain capitalized line with no markers/digits is treated as a title
+    # continuation, so there is no author line to parse.
+    assert guess_authors("Title Line\nMore Title\nAbstract\nbody") == []
 
 
 def test_guess_abstract():
@@ -115,6 +151,22 @@ def test_guess_abstract_stops_at_section_heading():
 
 def test_guess_abstract_empty_when_absent():
     assert guess_abstract("Title\nbody with no abstract marker") == ""
+
+
+def test_guess_abstract_inline_colon():
+    text = "Title\nAbstract: This is the abstract.\n1 Introduction\nbody"
+    assert guess_abstract(text) == "This is the abstract."
+
+
+def test_guess_abstract_tolerates_stray_prefix():
+    # A stray one-letter prefix (e.g. a figure label) before "Abstract".
+    text = "Title\nb Abstract\nThe real abstract text.\n1 Introduction"
+    assert guess_abstract(text) == "The real abstract text."
+
+
+def test_guess_abstract_ignores_word_starting_with_abstract():
+    # "Abstractive" must not be mistaken for an abstract heading.
+    assert guess_abstract("Title\nAbstractive methods are great") == ""
 
 
 def test_guess_keywords():

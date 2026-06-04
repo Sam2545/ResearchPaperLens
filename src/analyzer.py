@@ -25,7 +25,28 @@ _SECTION_RE = re.compile(r"^(\d+(?:\.\d+)*)\s+(\S.*)$")
 
 # Superscript / footnote markers attached to author names and footnotes.
 _AUTHOR_MARKERS = "∗*†‡§¶"
-_AUTHOR_MARKER_RE = re.compile(f"[{re.escape(_AUTHOR_MARKERS)}]")
+
+# Splits an author line into individual names: on commas and on any marker.
+_AUTHOR_SPLIT_RE = re.compile(f"[,;{re.escape(_AUTHOR_MARKERS)}]")
+
+# Matches an "Abstract" heading, tolerating a stray one-letter prefix (e.g. the
+# "b Abstract" produced when a figure label bleeds in) and an inline colon with
+# trailing text ("Abstract: ..."). group(1) captures any inline abstract text.
+_ABSTRACT_RE = re.compile(r"^(?:[A-Za-z]\s+)?abstract\b\s*:?\s*(.*)$", re.IGNORECASE)
+
+# Substrings that mark a header line as an affiliation rather than authors.
+_AFFILIATION_KEYWORDS = (
+    "universit",
+    "institute",
+    "laborator",
+    "college",
+    "department",
+    "academy",
+    "hospital",
+    "affiliation",
+    "research",
+    "school of",
+)
 
 # Line prefixes that introduce a keyword list.
 _KEYWORD_PREFIXES = ("keywords", "key words", "index terms")
@@ -36,31 +57,83 @@ def count_words(text: str) -> int:
     return len(text.split())
 
 
+def _find_abstract(lines: list[str]) -> tuple[int, str]:
+    """Locate the abstract heading.
+
+    Returns ``(index, inline_text)`` where ``index`` is the line of the heading
+    (or ``len(lines)`` if absent) and ``inline_text`` is any abstract text that
+    appeared on the heading line itself (e.g. ``"Abstract: ..."``).
+    """
+    for i, line in enumerate(lines):
+        match = _ABSTRACT_RE.match(line.strip())
+        if match:
+            return i, match.group(1).strip()
+    return len(lines), ""
+
+
+def _looks_like_title(line: str) -> bool:
+    """True if ``line`` looks like a title (multi-word, mostly capitalized)."""
+    if not line or "@" in line or len(line) > 200:
+        return False
+    tokens = line.split()
+    if len(tokens) < 2:
+        return False
+    alpha_tokens = [t for t in tokens if any(c.isalpha() for c in t)]
+    if not alpha_tokens:
+        return False
+    capitalized = sum(1 for t in alpha_tokens if t[0].isupper())
+    return capitalized / len(alpha_tokens) >= 0.6
+
+
+def _is_title_continuation(line: str) -> bool:
+    """True if ``line`` looks like a wrapped continuation of the title.
+
+    Titles often wrap across two or three lines. A continuation has no author
+    markers, emails, or digits (which signal author/affiliation lines), and its
+    words are title-cased.
+    """
+    if not line or "@" in line or len(line) > 200:
+        return False
+    if any(c.isdigit() for c in line) or any(m in line for m in _AUTHOR_MARKERS):
+        return False
+    alpha_tokens = [t for t in line.split() if any(c.isalpha() for c in t)]
+    if not alpha_tokens:
+        return False
+    return all(t[0].isupper() for t in alpha_tokens)
+
+
+def _title_span(lines: list[str]) -> tuple[int, int]:
+    """Return ``(start, end)`` line indices spanning the title (end exclusive)."""
+    abstract_idx, _ = _find_abstract(lines)
+    start = None
+    for i in range(min(abstract_idx, len(lines))):
+        if _looks_like_title(lines[i].strip()):
+            start = i
+            break
+    if start is None:
+        return 0, 0
+    end = start + 1
+    # Capture up to two wrapped continuation lines.
+    while (
+        end < abstract_idx
+        and end - start < 3
+        and _is_title_continuation(lines[end].strip())
+    ):
+        end += 1
+    return start, end
+
+
 def guess_title(text: str) -> str:
     """Best-effort guess of the paper title.
 
-    Returns the first multi-word, mostly-capitalized line that appears before
-    the abstract. Lines extracted as a single glued token (a common PDF
-    artifact for body paragraphs) are skipped.
+    Finds the first multi-word, mostly-capitalized line before the abstract and
+    joins any wrapped continuation lines into the full title.
     """
-    for line in text.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        if stripped.lower().startswith("abstract"):
-            break
-        if "@" in stripped or len(stripped) > 100:
-            continue
-        tokens = stripped.split()
-        if len(tokens) < 2:
-            continue
-        alpha_tokens = [t for t in tokens if any(c.isalpha() for c in t)]
-        if not alpha_tokens:
-            continue
-        capitalized = sum(1 for t in alpha_tokens if t[0].isupper())
-        if capitalized / len(alpha_tokens) >= 0.6:
-            return stripped
-    return ""
+    lines = text.splitlines()
+    start, end = _title_span(lines)
+    if start == end:
+        return ""
+    return " ".join(lines[i].strip() for i in range(start, end))
 
 
 def guess_section_headings(text: str) -> list[str]:
@@ -86,53 +159,65 @@ def _split_camel_case(token: str) -> str:
     return re.sub(r"(?<=[a-z.])(?=[A-Z])", " ", token)
 
 
-def _abstract_index(lines: list[str]) -> int:
-    """Return the index of the ``Abstract`` marker line, or ``len(lines)``."""
-    for i, line in enumerate(lines):
-        if line.strip().lower() == "abstract":
-            return i
-    return len(lines)
+def _clean_author_name(piece: str) -> str:
+    """Normalize one split author token into a name, or ``""`` if not a name.
+
+    Strips surrounding affiliation digits/markers/punctuation, splits glued
+    ``CamelCase`` names, and accepts only 2-4 token, title-cased names.
+    """
+    name = _split_camel_case(piece.strip(" \t0123456789.")).strip()
+    tokens = name.split()
+    if not (2 <= len(tokens) <= 4):
+        return ""
+    if not all(t[0].isupper() for t in tokens):
+        return ""
+    if not any(c.isalpha() for c in name):
+        return ""
+    return name
 
 
 def guess_authors(text: str) -> list[str]:
     """Best-effort guess of author names from the header block.
 
-    Author lines in the header carry a superscript marker (e.g. ``∗``) after
-    each name, so we split those lines on the markers to separate the authors.
-    Email/affiliation lines are skipped. As a fallback for extractors that glue
-    ``CamelCase`` names together, each name is also split at case boundaries.
+    Looks only at lines between the title and the abstract, skipping emails and
+    affiliation lines. Author lines are split on commas and superscript markers,
+    and each piece is normalized into a plausible name.
     """
     lines = [line.strip() for line in text.splitlines()]
-    header = lines[: _abstract_index(lines)]
+    abstract_idx, _ = _find_abstract(lines)
+    _, title_end = _title_span(lines)
 
     authors: list[str] = []
     seen: set[str] = set()
-    for line in header:
-        if "@" in line or not _AUTHOR_MARKER_RE.search(line):
+    for line in lines[title_end:abstract_idx]:
+        if not line or "@" in line or line[0].isdigit():
             continue
-        for piece in _AUTHOR_MARKER_RE.split(line):
-            name = piece.strip(" 0123456789.,")
-            if len(name) < 2 or not name[0].isupper():
-                continue
-            name = _split_camel_case(name)
-            if name not in seen:
+        lowered = line.lower()
+        if any(keyword in lowered for keyword in _AFFILIATION_KEYWORDS):
+            continue
+        for piece in _AUTHOR_SPLIT_RE.split(line):
+            name = _clean_author_name(piece)
+            if name and name not in seen:
                 seen.add(name)
                 authors.append(name)
     return authors
 
 
 def guess_abstract(text: str) -> str:
-    """Return the abstract text if an ``Abstract`` marker is present.
+    """Return the abstract text if an ``Abstract`` heading is present.
 
-    Collects lines after the ``Abstract`` heading, stopping at the first
-    footnote marker, numbered section heading, or keyword line.
+    Collects lines after the heading (plus any inline text on the heading line),
+    stopping at the first footnote marker, numbered section heading, or keyword
+    line.
     """
     lines = text.splitlines()
-    start = _abstract_index(lines)
+    start, inline = _find_abstract(lines)
     if start == len(lines):
         return ""
 
     collected: list[str] = []
+    if inline:
+        collected.append(inline)
     for line in lines[start + 1 :]:
         stripped = line.strip()
         if not stripped:
