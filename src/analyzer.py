@@ -6,10 +6,11 @@ care where the text came from. Callers extract the text (e.g. via
 helper function, and each derived field is cached on :class:`PaperAnalyzer` via
 :func:`functools.cached_property` so repeated access never recomputes.
 
-Only the fields we can derive reliably are populated for now (title, section
-headings, word count). Richer fields (authors, abstract, keywords, references,
-doi, publication_year, venue) are intentionally left at their dataclass
-defaults and can be added later.
+The heuristics target the common single-column research-paper layout (title at
+the top, an author block, an ``Abstract`` heading, then numbered sections).
+They are best-effort and may need tuning for other layouts. The remaining
+fields (references, doi, publication_year, venue) are still left at their
+dataclass defaults.
 """
 
 from __future__ import annotations
@@ -21,6 +22,13 @@ from src.paper import ResearchPaper
 
 # Matches a numbered section heading line, e.g. "3.2.1 Scaled Dot-Product".
 _SECTION_RE = re.compile(r"^(\d+(?:\.\d+)*)\s+(\S.*)$")
+
+# Superscript / footnote markers attached to author names and footnotes.
+_AUTHOR_MARKERS = "∗*†‡§¶"
+_AUTHOR_MARKER_RE = re.compile(f"[{re.escape(_AUTHOR_MARKERS)}]")
+
+# Line prefixes that introduce a keyword list.
+_KEYWORD_PREFIXES = ("keywords", "key words", "index terms")
 
 
 def count_words(text: str) -> int:
@@ -73,6 +81,86 @@ def guess_section_headings(text: str) -> list[str]:
     return headings
 
 
+def _split_camel_case(token: str) -> str:
+    """Insert spaces at lower/period -> upper boundaries (``"AbC"`` -> ``"Ab C"``)."""
+    return re.sub(r"(?<=[a-z.])(?=[A-Z])", " ", token)
+
+
+def _abstract_index(lines: list[str]) -> int:
+    """Return the index of the ``Abstract`` marker line, or ``len(lines)``."""
+    for i, line in enumerate(lines):
+        if line.strip().lower() == "abstract":
+            return i
+    return len(lines)
+
+
+def guess_authors(text: str) -> list[str]:
+    """Best-effort guess of author names from the header block.
+
+    Author lines in the header carry a superscript marker (e.g. ``∗``) after
+    each name, so we split those lines on the markers to separate the authors.
+    Email/affiliation lines are skipped. As a fallback for extractors that glue
+    ``CamelCase`` names together, each name is also split at case boundaries.
+    """
+    lines = [line.strip() for line in text.splitlines()]
+    header = lines[: _abstract_index(lines)]
+
+    authors: list[str] = []
+    seen: set[str] = set()
+    for line in header:
+        if "@" in line or not _AUTHOR_MARKER_RE.search(line):
+            continue
+        for piece in _AUTHOR_MARKER_RE.split(line):
+            name = piece.strip(" 0123456789.,")
+            if len(name) < 2 or not name[0].isupper():
+                continue
+            name = _split_camel_case(name)
+            if name not in seen:
+                seen.add(name)
+                authors.append(name)
+    return authors
+
+
+def guess_abstract(text: str) -> str:
+    """Return the abstract text if an ``Abstract`` marker is present.
+
+    Collects lines after the ``Abstract`` heading, stopping at the first
+    footnote marker, numbered section heading, or keyword line.
+    """
+    lines = text.splitlines()
+    start = _abstract_index(lines)
+    if start == len(lines):
+        return ""
+
+    collected: list[str] = []
+    for line in lines[start + 1 :]:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        lowered = stripped.lower()
+        if (
+            stripped[:1] in _AUTHOR_MARKERS
+            or _SECTION_RE.match(stripped)
+            or any(lowered.startswith(prefix) for prefix in _KEYWORD_PREFIXES)
+        ):
+            break
+        collected.append(stripped)
+    return " ".join(collected)
+
+
+def guess_keywords(text: str) -> list[str]:
+    """Return keywords if a ``Keywords``/``Index Terms`` line is present."""
+    for line in text.splitlines():
+        stripped = line.strip()
+        lowered = stripped.lower()
+        for prefix in _KEYWORD_PREFIXES:
+            if lowered.startswith(prefix):
+                rest = stripped[len(prefix) :].lstrip(" :-\u2014\u2013")
+                parts = re.split(r"[;,]", rest)
+                return [p.strip() for p in parts if p.strip()]
+    return []
+
+
 class PaperAnalyzer:
     """Derive structured :class:`ResearchPaper` fields from extracted text.
 
@@ -103,14 +191,29 @@ class PaperAnalyzer:
     def section_headings(self) -> list[str]:
         return guess_section_headings(self.full_text)
 
+    @cached_property
+    def authors(self) -> list[str]:
+        return guess_authors(self.full_text)
+
+    @cached_property
+    def abstract(self) -> str:
+        return guess_abstract(self.full_text)
+
+    @cached_property
+    def keywords(self) -> list[str]:
+        return guess_keywords(self.full_text)
+
     def to_paper(self) -> ResearchPaper:
         """Assemble the derived fields into a :class:`ResearchPaper`.
 
-        Authors, abstract, keywords, references, doi, publication_year and venue
-        are intentionally left at their dataclass defaults for now.
+        References, doi, publication_year and venue are still left at their
+        dataclass defaults for now.
         """
         return ResearchPaper(
             title=self.title,
+            authors=self.authors,
+            abstract=self.abstract,
+            keywords=self.keywords,
             section_headings=self.section_headings,
             page_count=self.page_count,
             word_count=self.word_count,

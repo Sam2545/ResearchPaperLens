@@ -16,6 +16,9 @@ from src.analyzer import (
     PaperAnalyzer,
     analyze,
     count_words,
+    guess_abstract,
+    guess_authors,
+    guess_keywords,
     guess_section_headings,
     guess_title,
 )
@@ -28,8 +31,12 @@ SAMPLE_TEXT = "\n".join(
     [
         "Some boilerplate notice line that is one glued token here",
         "A Great Paper About Things",
+        "JaneDoe∗ JohnSmith∗",
+        "Example University",
+        "jane@example.com john@example.com",
         "Abstract",
         "This paper introduces a method. It works well on benchmarks.",
+        "Keywords: machine learning, transformers, attention",
         "1 Introduction",
         "Intro body text goes here.",
         "2 Related Work",
@@ -38,6 +45,17 @@ SAMPLE_TEXT = "\n".join(
         "Even more text.",
     ]
 )
+
+EXPECTED_AUTHORS = [
+    "Ashish Vaswani",
+    "Noam Shazeer",
+    "Niki Parmar",
+    "Jakob Uszkoreit",
+    "Llion Jones",
+    "Aidan N. Gomez",
+    "Łukasz Kaiser",
+    "Illia Polosukhin",
+]
 
 
 # --- Pure helper tests (synthetic input) ------------------------------------
@@ -73,6 +91,42 @@ def test_guess_section_headings():
 def test_guess_section_headings_ignores_lowercase_and_long_lines():
     text = "1 introduction lowercase\n2 A" + "x" * 80 + "\n3 Valid Heading"
     assert guess_section_headings(text) == ["3 Valid Heading"]
+
+
+def test_guess_authors():
+    assert guess_authors(SAMPLE_TEXT) == ["Jane Doe", "John Smith"]
+
+
+def test_guess_authors_empty_without_markers():
+    assert guess_authors("Title Line\nNo Markers Here\nAbstract\nbody") == []
+
+
+def test_guess_abstract():
+    assert (
+        guess_abstract(SAMPLE_TEXT)
+        == "This paper introduces a method. It works well on benchmarks."
+    )
+
+
+def test_guess_abstract_stops_at_section_heading():
+    text = "Abstract\nLine one.\n1 Introduction\nbody"
+    assert guess_abstract(text) == "Line one."
+
+
+def test_guess_abstract_empty_when_absent():
+    assert guess_abstract("Title\nbody with no abstract marker") == ""
+
+
+def test_guess_keywords():
+    assert guess_keywords(SAMPLE_TEXT) == [
+        "machine learning",
+        "transformers",
+        "attention",
+    ]
+
+
+def test_guess_keywords_empty_when_absent():
+    assert guess_keywords("Title\nAbstract\nbody") == []
 
 
 # --- Integration tests against the real PDF ---------------------------------
@@ -113,9 +167,26 @@ def test_analyzer_section_headings(analyzer: PaperAnalyzer):
     assert len(headings) == 22
 
 
+def test_analyzer_authors(analyzer: PaperAnalyzer):
+    assert analyzer.authors == EXPECTED_AUTHORS
+
+
+def test_analyzer_abstract(analyzer: PaperAnalyzer):
+    abstract = analyzer.abstract
+    assert abstract.startswith("The dominant sequence transduction models")
+    assert "Transformer" in abstract
+    assert abstract.endswith("large and limited training data.")
+
+
+def test_analyzer_keywords_is_empty_for_this_paper(analyzer: PaperAnalyzer):
+    # This paper has no explicit keywords / index terms line.
+    assert analyzer.keywords == []
+
+
 def test_cached_property_returns_same_object(analyzer: PaperAnalyzer):
     # cached_property should return the identical object on repeated access.
     assert analyzer.section_headings is analyzer.section_headings
+    assert analyzer.authors is analyzer.authors
 
 
 def test_to_paper_builds_research_paper(analyzer: PaperAnalyzer):
@@ -128,12 +199,16 @@ def test_to_paper_builds_research_paper(analyzer: PaperAnalyzer):
     assert paper.full_text == analyzer.full_text
 
 
-def test_to_paper_leaves_deferred_fields_at_defaults(analyzer: PaperAnalyzer):
-    # These fields are intentionally not populated yet.
+def test_to_paper_populates_derived_fields(analyzer: PaperAnalyzer):
     paper = analyzer.to_paper()
-    assert paper.authors == []
-    assert paper.abstract == ""
-    assert paper.keywords == []
+    assert paper.authors == EXPECTED_AUTHORS
+    assert paper.abstract == analyzer.abstract
+    assert paper.keywords == analyzer.keywords
+
+
+def test_to_paper_leaves_remaining_fields_at_defaults(analyzer: PaperAnalyzer):
+    # These fields are intentionally not derived yet.
+    paper = analyzer.to_paper()
     assert paper.references == []
     assert paper.doi == ""
     assert paper.publication_year == 0

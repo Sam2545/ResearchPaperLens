@@ -16,28 +16,39 @@ from src.storage import load_paper
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 PDF_PATH = PROJECT_ROOT / "data" / "AttentionIsAllYouNeed.pdf"
 
+EXPECTED_AUTHORS = [
+    "Ashish Vaswani",
+    "Noam Shazeer",
+    "Niki Parmar",
+    "Jakob Uszkoreit",
+    "Llion Jones",
+    "Aidan N. Gomez",
+    "Łukasz Kaiser",
+    "Illia Polosukhin",
+]
+
 EXPECTED_SECTION_HEADINGS = [
     "1 Introduction",
     "2 Background",
-    "3 ModelArchitecture",
-    "3.1 EncoderandDecoderStacks",
+    "3 Model Architecture",
+    "3.1 Encoder and Decoder Stacks",
     "3.2 Attention",
-    "3.2.1 ScaledDot-ProductAttention",
-    "3.2.2 Multi-HeadAttention",
-    "3.2.3 ApplicationsofAttentioninourModel",
-    "3.3 Position-wiseFeed-ForwardNetworks",
-    "3.4 EmbeddingsandSoftmax",
-    "3.5 PositionalEncoding",
-    "4 WhySelf-Attention",
+    "3.2.1 Scaled Dot-Product Attention",
+    "3.2.2 Multi-Head Attention",
+    "3.2.3 Applications of Attention in our Model",
+    "3.3 Position-wise Feed-Forward Networks",
+    "3.4 Embeddings and Softmax",
+    "3.5 Positional Encoding",
+    "4 Why Self-Attention",
     "5 Training",
-    "5.1 TrainingDataandBatching",
-    "5.2 HardwareandSchedule",
+    "5.1 Training Data and Batching",
+    "5.2 Hardware and Schedule",
     "5.3 Optimizer",
     "5.4 Regularization",
     "6 Results",
-    "6.1 MachineTranslation",
-    "6.2 ModelVariations",
-    "6.3 EnglishConstituencyParsing",
+    "6.1 Machine Translation",
+    "6.2 Model Variations",
+    "6.3 English Constituency Parsing",
     "7 Conclusion",
 ]
 
@@ -53,15 +64,18 @@ def test_full_pipeline_writes_loadable_json(tmp_path):
     paper = load_paper(output_path)
     assert isinstance(paper, ResearchPaper)
 
-    # full_text is extraction-dependent and large, so guard it separately and
-    # reuse the actual value in the expected object below.
+    # full_text and abstract are large/extraction-dependent, so guard them
+    # separately and reuse the actual values in the expected object below.
     assert paper.full_text.strip()
 
     expected = ResearchPaper(
         title="Attention Is All You Need",
+        authors=EXPECTED_AUTHORS,
+        abstract=paper.abstract,
+        keywords=[],
         section_headings=EXPECTED_SECTION_HEADINGS,
         page_count=15,
-        word_count=2033,
+        word_count=6166,
         full_text=paper.full_text,
         source_path=str(PDF_PATH),
     )

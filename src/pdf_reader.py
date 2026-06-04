@@ -7,10 +7,15 @@ from pathlib import Path
 import pdfplumber
 from pdfplumber.pdf import PDF
 
+# pdfplumber infers word spaces from the horizontal gap between glyphs. Its
+# default (3) is too wide for dense, justified paper text and glues words
+# together; 2 recovers spaces reliably without splitting words apart.
+DEFAULT_X_TOLERANCE = 2
 
-def extract_text(pdf: PDF) -> str:
+
+def extract_text(pdf: PDF, x_tolerance: float = DEFAULT_X_TOLERANCE) -> str:
     """Return the full text of an opened ``pdf``."""
-    pages = [page.extract_text() or "" for page in pdf.pages]
+    pages = [page.extract_text(x_tolerance=x_tolerance) or "" for page in pdf.pages]
     return "\n".join(pages)
 
 
