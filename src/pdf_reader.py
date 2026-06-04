@@ -1,6 +1,7 @@
 """Utilities for extracting text from PDF files."""
 
+from __future__ import annotations
 
-def read_pdf(path: str) -> str:
-    """Read a PDF file and return its extracted text."""
-    raise NotImplementedError
+from pathlib import Path
+
+import pdfplumber
