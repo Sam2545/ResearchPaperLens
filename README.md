@@ -1,16 +1,18 @@
 # ResearchPaperLens
 
 A small, modular pipeline that reads a research-paper PDF, extracts structured
-metadata (title, authors, abstract, section headings, and more), and saves the
+metadata (title, authors, abstract, section headings, and more), optionally
+generates a structured LLM summary using an Ollama cloud model, and saves the
 result as clean JSON.
 
 ## Current Phase
 
-ResearchPaperLens is currently in Phase 1. It focuses on extracting structured
-metadata from research-paper PDFs and saving the result as JSON.
+ResearchPaperLens extracts structured metadata from research-paper PDFs, saves
+the result as JSON, and can optionally generate an LLM summary and key insights
+using an Ollama cloud model (opt-in via `--summarize`).
 
-It does not currently perform LLM summarization, semantic search, embeddings,
-RAG, or web deployment. Those capabilities are planned for later phases.
+It does not currently perform semantic search, embeddings, RAG, or web
+deployment. Those capabilities are planned for later phases.
 
 ## Features
 
@@ -19,8 +21,10 @@ RAG, or web deployment. Those capabilities are planned for later phases.
 - Guesses title and authors
 - Extracts abstract and keywords when present
 - Detects section headings
-- Reserves `summary` / `key_insights` fields, populated by an opt-in
-  (`--summarize`) placeholder summarizer (no LLM yet)
+- Optional LLM summarization: fills a structured `summary` (tldr, problem,
+  approach, key results/metrics, contributions, limitations, key insights) via
+  an Ollama cloud model (opt-in with `--summarize`, model selectable with
+  `--model`)
 - Saves structured results as JSON
 - Includes unit and integration tests
 
@@ -34,7 +38,7 @@ The pipeline is split into focused, independently testable modules:
 │   ├── paper.py        # ResearchPaper data model (dataclass)
 │   ├── pdf_reader.py   # PDF I/O: extract full text + page count
 │   ├── analyzer.py     # Pure analysis: text -> ResearchPaper fields
-│   ├── summarizer.py   # Placeholder summarizer: fills summary/key_insights
+│   ├── summarizer.py   # LLM summarizer (Ollama cloud): summary/key_insights
 │   └── storage.py      # Serialize ResearchPaper <-> JSON
 ├── data/               # Input PDFs
 ├── outputs/            # Generated JSON output (git-ignored)
@@ -64,6 +68,30 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+### Summarization (optional)
+
+LLM summarization uses [Ollama cloud models](https://docs.ollama.com/cloud) via
+the cloud API. To use `--summarize`, create an API key at
+[ollama.com/settings/keys](https://ollama.com/settings/keys) and provide it as
+the `OLLAMA_API_KEY` environment variable.
+
+The recommended way is a local `.env` file (auto-loaded via `python-dotenv` and
+git-ignored, so your key is never committed). Copy the template and fill it in:
+
+```bash
+cp .env.example .env
+# then edit .env and set OLLAMA_API_KEY=your_api_key
+```
+
+Alternatively, export it in your shell:
+
+```bash
+export OLLAMA_API_KEY=your_api_key
+```
+
+The key is only required when running with `--summarize`; the rest of the
+pipeline works without it.
+
 ## Usage
 
 Run the pipeline on a PDF:
@@ -78,16 +106,21 @@ python main.py path/to/paper.pdf
 # Choose an explicit output file
 python main.py path/to/paper.pdf -o results/paper.json
 
-# Run the (placeholder) summarizer to fill summary/key_insights before saving
+# Summarize with an Ollama cloud model (requires OLLAMA_API_KEY)
 python main.py path/to/paper.pdf --summarize
+
+# Switch the cloud model used for summarization
+python main.py path/to/paper.pdf --summarize --model gpt-oss:20b
 ```
 
 See all options with `python main.py --help`.
 
-> **Note:** `--summarize` currently uses a placeholder summarizer in
-> `src/summarizer.py` that leaves `summary`/`key_insights` empty. It wires up
-> the pipeline so a real summarization implementation can drop in later without
-> further changes. No LLM is used yet.
+> **Note:** `--summarize` calls an Ollama cloud model to populate
+> `summary`/`key_insights` and requires `OLLAMA_API_KEY` to be set. The model
+> defaults to `gpt-oss:120b` and can be changed with `--model`; other options
+> include `gpt-oss:20b`, `qwen3-coder:480b`, and `deepseek-v3.1:671b` (see
+> [Ollama cloud models](https://ollama.com/search?c=cloud)). `--model` has no
+> effect without `--summarize`.
 
 You can also use the pieces directly in Python:
 
@@ -123,16 +156,32 @@ The output JSON mirrors the `ResearchPaper` dataclass. Example (abridged):
   "publication_year": 0,
   "venue": "",
   "source_path": "data/AttentionIsAllYouNeed.pdf",
-  "summary": "",
-  "key_insights": []
+  "summary": {
+    "tldr": "",
+    "problem": "",
+    "approach": "",
+    "key_results": [],
+    "contributions": [],
+    "limitations": [],
+    "key_insights": []
+  }
 }
 ```
 
 Currently derived: `title`, `authors`, `abstract`, `keywords`, `section_headings`,
 `page_count`, `word_count`, `full_text`, `source_path`. The remaining fields
 (`references`, `doi`, `publication_year`, `venue`) are reserved and left at their
-defaults for now. `summary` and `key_insights` are reserved for summarization and
-only populated when `--summarize` is passed (currently a no-op placeholder).
+defaults for now. `summary` is a structured object (a "summary card") populated
+by the LLM summarizer when `--summarize` is passed; otherwise its fields stay
+empty. Its fields are:
+
+- `tldr` - a 1-2 sentence plain-English overview
+- `problem` - the problem or motivation the paper addresses
+- `approach` - the method or technique used
+- `key_results` - main findings, including quantitative metrics when stated
+- `contributions` - the paper's novel contributions
+- `limitations` - caveats or weaknesses
+- `key_insights` - the most important standalone takeaways
 
 ## Limitations
 
@@ -144,6 +193,9 @@ only populated when `--summarize` is passed (currently a no-op placeholder).
 - Keywords are only extracted when the paper has an explicit `Keywords` /
   `Index Terms` line; otherwise the field is left empty.
 - `references`, `doi`, `publication_year`, and `venue` are not yet extracted.
+- Summarization sends only the first ~12k characters of the paper to the model
+  (to stay within context limits), so very long papers are summarized from their
+  earlier sections.
 
 ## Tests
 
@@ -155,3 +207,9 @@ python -m pytest
 python -m pytest tests --ignore=tests/integration
 python -m pytest tests/integration
 ```
+
+Unit tests are fully offline: the summarizer tests patch the Ollama network
+boundary, so no API key or network access is needed. There is also a live API
+integration test (`tests/integration/test_summarizer_live_api.py`) that calls a
+real Ollama cloud model; it is skipped automatically unless `OLLAMA_API_KEY` is
+set (e.g. via `.env`).

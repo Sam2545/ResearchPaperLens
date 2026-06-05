@@ -1,47 +1,227 @@
-"""Tests for the placeholder summarizer (:mod:`src.summarizer`).
+"""Tests for the Ollama-cloud-backed summarizer (:mod:`src.summarizer`).
 
-These verify the summarizer is wired up correctly -- not that it produces real
-summaries (it is a stub). They check the function signatures, return shapes, and
-that the summary fields are attached to the ResearchPaper without disturbing the
-rest of the paper.
+These run entirely offline. Rather than threading a fake through the production
+API, they patch the single network boundary -- :func:`build_cloud_client` -- so
+the summarizer builds a ``FakeClient`` instead of a real one. No network calls
+or API key are required. The tests verify request construction (model, schema,
+message contents), response parsing, truncation, non-mutation, error handling,
+and the API-key boundary in :func:`build_cloud_client`.
 """
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
+from types import SimpleNamespace
 
-from src.paper import ResearchPaper
-from src.summarizer import summarize, summarize_text
+import pytest
+
+import src.summarizer as summarizer_module
+from src.paper import PaperSummary, ResearchPaper
+from src.summarizer import (
+    _MAX_INPUT_CHARS,
+    API_KEY_ENV,
+    DEFAULT_MODEL,
+    OllamaSummarizer,
+    SummarizationError,
+    build_cloud_client,
+    summarize,
+    summarize_text,
+)
+
+# A complete, valid structured-summary payload the model might return.
+_FULL_SUMMARY = {
+    "tldr": "A concise overview.",
+    "problem": "The problem addressed.",
+    "approach": "The method used.",
+    "key_results": ["BLEU 28.4", "+3% accuracy"],
+    "contributions": ["A novel architecture"],
+    "limitations": ["Only tested on English"],
+    "key_insights": ["insight one", "insight two"],
+}
 
 
-def test_summarize_text_returns_str_and_list():
-    summary, key_insights = summarize_text("some paper body text")
-    assert isinstance(summary, str)
-    assert isinstance(key_insights, list)
+class FakeClient:
+    """Stands in for ``ollama.Client``: records calls, returns canned content.
+
+    ``chat`` returns an object shaped like a real ollama ``ChatResponse``
+    (``response.message.content``) so the production code path is unchanged.
+    """
+
+    def __init__(self, content: str):
+        self._content = content
+        self.calls: list[dict] = []
+
+    def chat(self, **kwargs):
+        self.calls.append(kwargs)
+        return SimpleNamespace(message=SimpleNamespace(content=self._content))
 
 
-def test_summarize_returns_research_paper_with_summary_fields():
+@pytest.fixture
+def fake_client(monkeypatch):
+    """Patch build_cloud_client so the summarizer uses a FakeClient.
+
+    Returns an installer: call it with a dict payload (serialized to JSON) or a
+    raw string (used verbatim, for malformed-response tests). It returns the
+    FakeClient so tests can inspect ``.calls``.
+    """
+
+    def _install(payload) -> FakeClient:
+        content = json.dumps(payload) if isinstance(payload, dict) else payload
+        client = FakeClient(content)
+        monkeypatch.setattr(
+            summarizer_module, "build_cloud_client", lambda **kwargs: client
+        )
+        return client
+
+    return _install
+
+
+@pytest.fixture
+def no_dotenv(monkeypatch):
+    """Stop build_cloud_client from reading a real local .env during tests."""
+    monkeypatch.setattr(summarizer_module, "load_dotenv", lambda *a, **k: False)
+
+
+def test_summarize_text_parses_full_structured_summary(fake_client):
+    fake_client(_FULL_SUMMARY)
+    summary = summarize_text("paper body")
+    assert isinstance(summary, PaperSummary)
+    assert summary.tldr == "A concise overview."
+    assert summary.problem == "The problem addressed."
+    assert summary.approach == "The method used."
+    assert summary.key_results == ["BLEU 28.4", "+3% accuracy"]
+    assert summary.contributions == ["A novel architecture"]
+    assert summary.limitations == ["Only tested on English"]
+    assert summary.key_insights == ["insight one", "insight two"]
+
+
+def test_summarize_text_sends_model_schema_and_text(fake_client):
+    client = fake_client(_FULL_SUMMARY)
+    summarize_text("the paper body text", model="gpt-oss:20b")
+    call = client.calls[0]
+    assert call["model"] == "gpt-oss:20b"
+    props = call["format"]["properties"]
+    assert "tldr" in props
+    assert "key_results" in props
+    assert "key_insights" in props
+    user_msg = call["messages"][-1]["content"]
+    assert "the paper body text" in user_msg
+
+
+def test_default_model_is_used_when_unspecified(fake_client):
+    client = fake_client(_FULL_SUMMARY)
+    summarize_text("body")
+    assert client.calls[0]["model"] == DEFAULT_MODEL
+
+
+def test_long_text_is_truncated_before_sending(fake_client):
+    client = fake_client(_FULL_SUMMARY)
+    summarize_text("x" * (_MAX_INPUT_CHARS + 5000))
+    user_msg = client.calls[0]["messages"][-1]["content"]
+    # The prompt has a wrapper, but the paper body portion must be capped.
+    assert user_msg.count("x") == _MAX_INPUT_CHARS
+
+
+def test_summarize_returns_research_paper_with_summary(fake_client):
+    fake_client(_FULL_SUMMARY)
     paper = ResearchPaper(title="A Paper", full_text="body")
     result = summarize(paper)
     assert isinstance(result, ResearchPaper)
-    assert isinstance(result.summary, str)
-    assert isinstance(result.key_insights, list)
+    assert isinstance(result.summary, PaperSummary)
+    assert result.summary.tldr == "A concise overview."
+    assert result.summary.key_results == ["BLEU 28.4", "+3% accuracy"]
 
 
-def test_summarize_preserves_other_fields():
-    paper = ResearchPaper(
-        title="A Paper",
-        authors=["Jane Doe"],
-        abstract="An abstract.",
-        full_text="body",
-    )
-    result = summarize(paper)
-    # Everything except the two summary fields should be unchanged.
-    assert replace(result, summary="", key_insights=[]) == paper
-
-
-def test_summarize_does_not_mutate_input():
+def test_summarize_does_not_mutate_input(fake_client):
+    fake_client(_FULL_SUMMARY)
     paper = ResearchPaper(title="A Paper", full_text="body")
     summarize(paper)
-    assert paper.summary == ""
-    assert paper.key_insights == []
+    assert paper.summary == PaperSummary()
+
+
+def test_summarize_preserves_other_fields(fake_client):
+    fake_client(_FULL_SUMMARY)
+    paper = ResearchPaper(title="A Paper", authors=["Jane Doe"], full_text="body")
+    result = summarize(paper)
+    assert replace(result, summary=PaperSummary()) == paper
+
+
+def test_invalid_json_raises_summarization_error(fake_client):
+    fake_client("not json at all")
+    with pytest.raises(SummarizationError):
+        summarize_text("body")
+
+
+def test_parses_json_wrapped_in_code_fence(fake_client):
+    # Reasoning models often prepend chain-of-thought and fence the JSON.
+    reasoning = "Let's think. We must return JSON.\n\n"
+    fenced = "```json\n" + json.dumps(_FULL_SUMMARY) + "\n```"
+    fake_client(reasoning + fenced)
+    summary = summarize_text("body")
+    assert summary.tldr == "A concise overview."
+    assert summary.key_results == ["BLEU 28.4", "+3% accuracy"]
+
+
+def test_parses_json_with_leading_prose(fake_client):
+    fake_client("Here is the summary: " + json.dumps(_FULL_SUMMARY))
+    summary = summarize_text("body")
+    assert summary.tldr == "A concise overview."
+
+
+def test_missing_string_field_defaults_to_empty_string(fake_client):
+    fake_client({"key_insights": ["k"]})
+    summary = summarize_text("body")
+    assert summary.tldr == ""
+    assert summary.key_insights == ["k"]
+
+
+def test_missing_list_field_defaults_to_empty_list(fake_client):
+    fake_client({"tldr": "s"})
+    summary = summarize_text("body")
+    assert summary.tldr == "s"
+    assert summary.key_insights == []
+    assert summary.key_results == []
+
+
+def test_non_list_field_raises(fake_client):
+    fake_client({"tldr": "s", "key_insights": "nope"})
+    with pytest.raises(SummarizationError):
+        summarize_text("body")
+
+
+def test_non_string_field_raises(fake_client):
+    fake_client({"tldr": ["should be a string"]})
+    with pytest.raises(SummarizationError):
+        summarize_text("body")
+
+
+def test_client_is_built_once_and_cached(monkeypatch):
+    built = {"count": 0}
+    client = FakeClient(json.dumps(_FULL_SUMMARY))
+
+    def factory(**kwargs):
+        built["count"] += 1
+        return client
+
+    monkeypatch.setattr(summarizer_module, "build_cloud_client", factory)
+    summarizer = OllamaSummarizer()
+    summarizer.summarize_text("first")
+    summarizer.summarize_text("second")
+    assert built["count"] == 1
+
+
+def test_build_cloud_client_raises_without_api_key(monkeypatch, no_dotenv):
+    monkeypatch.delenv(API_KEY_ENV, raising=False)
+    with pytest.raises(RuntimeError, match=API_KEY_ENV):
+        build_cloud_client()
+
+
+def test_build_cloud_client_uses_api_key(monkeypatch, no_dotenv):
+    monkeypatch.setenv(API_KEY_ENV, "secret-key")
+    client = build_cloud_client()
+    # The ollama Client stores auth headers; verify ours is present.
+    assert any(
+        "secret-key" in str(value)
+        for value in getattr(client, "_client", client).headers.values()
+    )

@@ -1,2 +1,4 @@
 pdfplumber
 pytest
+ollama
+python-dotenv

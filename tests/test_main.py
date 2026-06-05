@@ -7,6 +7,7 @@ from pathlib import Path
 import main as main_module
 from main import DEFAULT_PDF, parse_args, process_pdf
 from src.storage import load_paper
+from src.summarizer import DEFAULT_MODEL
 
 PDF_PATH = Path(__file__).resolve().parent.parent / "data" / "AttentionIsAllYouNeed.pdf"
 
@@ -56,10 +57,20 @@ def test_parse_args_summarize_flag():
     assert args.summarize is True
 
 
+def test_parse_args_model_default():
+    args = parse_args([])
+    assert args.model == DEFAULT_MODEL
+
+
+def test_parse_args_model_flag():
+    args = parse_args(["some/paper.pdf", "--summarize", "--model", "gpt-oss:20b"])
+    assert args.model == "gpt-oss:20b"
+
+
 def test_process_pdf_summarize_runs_summarizer(tmp_path, monkeypatch):
     calls: list[str] = []
 
-    def fake_summarize(paper):
+    def fake_summarize(paper, *, model):
         calls.append(paper.title)
         return paper
 
@@ -68,8 +79,22 @@ def test_process_pdf_summarize_runs_summarizer(tmp_path, monkeypatch):
     assert calls == ["Attention Is All You Need"]
 
 
+def test_process_pdf_forwards_model_to_summarizer(tmp_path, monkeypatch):
+    used_models: list[str] = []
+
+    def fake_summarize(paper, *, model):
+        used_models.append(model)
+        return paper
+
+    monkeypatch.setattr(main_module, "summarize", fake_summarize)
+    process_pdf(
+        PDF_PATH, output_dir=tmp_path, summarize_paper=True, model="gpt-oss:20b"
+    )
+    assert used_models == ["gpt-oss:20b"]
+
+
 def test_process_pdf_skips_summarizer_by_default(tmp_path, monkeypatch):
-    def fail_summarize(paper):
+    def fail_summarize(paper, *, model):
         raise AssertionError("summarizer should not run without summarize_paper")
 
     monkeypatch.setattr(main_module, "summarize", fail_summarize)

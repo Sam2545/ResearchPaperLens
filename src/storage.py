@@ -12,7 +12,14 @@ import json
 from dataclasses import asdict, fields
 from pathlib import Path
 
-from src.paper import ResearchPaper
+from src.paper import PaperSummary, ResearchPaper
+
+
+def summary_from_dict(data: dict) -> PaperSummary:
+    """Build a :class:`PaperSummary` from a dict, ignoring unknown keys."""
+    known = {f.name for f in fields(PaperSummary)}
+    filtered = {key: value for key, value in data.items() if key in known}
+    return PaperSummary(**filtered)
 
 
 def paper_from_dict(data: dict) -> ResearchPaper:
@@ -20,10 +27,14 @@ def paper_from_dict(data: dict) -> ResearchPaper:
 
     Unknown keys are ignored and missing keys fall back to the dataclass
     defaults, so the loader stays forward/backward compatible as the schema
-    evolves.
+    evolves. The nested ``summary`` object is reconstructed into a
+    :class:`PaperSummary` (it arrives from JSON as a plain dict).
     """
     known = {f.name for f in fields(ResearchPaper)}
     filtered = {key: value for key, value in data.items() if key in known}
+    summary = filtered.get("summary")
+    if isinstance(summary, dict):
+        filtered["summary"] = summary_from_dict(summary)
     return ResearchPaper(**filtered)
 
 

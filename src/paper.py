@@ -4,6 +4,24 @@ from dataclasses import dataclass, field
 
 
 @dataclass
+class PaperSummary:
+    """Structured, LLM-generated summary of a paper (a "summary card").
+
+    Complements the metadata fields on :class:`ResearchPaper` (``title``,
+    ``authors``, etc.), which are derived separately by the analyzer. All fields
+    default to empty so an un-summarized paper has a valid, empty summary.
+    """
+
+    tldr: str = ""
+    problem: str = ""
+    approach: str = ""
+    key_results: list[str] = field(default_factory=list)
+    contributions: list[str] = field(default_factory=list)
+    limitations: list[str] = field(default_factory=list)
+    key_insights: list[str] = field(default_factory=list)
+
+
+@dataclass
 class ResearchPaper:
     """Structured representation of a research paper extracted from a PDF."""
 
@@ -23,7 +41,5 @@ class ResearchPaper:
     venue: str = ""
     source_path: str = ""
 
-    # Reserved for a future summarization phase. Left empty for now; no
-    # summarization logic populates these yet.
-    summary: str = ""
-    key_insights: list[str] = field(default_factory=list)
+    # Structured summary, populated by the summarizer (empty until then).
+    summary: PaperSummary = field(default_factory=PaperSummary)
