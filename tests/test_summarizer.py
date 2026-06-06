@@ -26,6 +26,7 @@ from src.summarizer import (
     SummarizationError,
     build_cloud_client,
     summarize,
+    summarize_full,
     summarize_text,
 )
 
@@ -57,6 +58,24 @@ class FakeClient:
         return SimpleNamespace(message=SimpleNamespace(content=self._content))
 
 
+class FakeClientQueue:
+    """Returns a sequence of canned responses across successive ``chat`` calls."""
+
+    def __init__(self, payloads: list):
+        self._contents = [
+            json.dumps(payload) if isinstance(payload, dict) else payload
+            for payload in payloads
+        ]
+        self.calls: list[dict] = []
+
+    def chat(self, **kwargs):
+        self.calls.append(kwargs)
+        if not self._contents:
+            raise AssertionError("FakeClientQueue ran out of canned responses")
+        content = self._contents.pop(0)
+        return SimpleNamespace(message=SimpleNamespace(content=content))
+
+
 @pytest.fixture
 def fake_client(monkeypatch):
     """Patch build_cloud_client so the summarizer uses a FakeClient.
@@ -75,6 +94,43 @@ def fake_client(monkeypatch):
         return client
 
     return _install
+
+
+@pytest.fixture
+def fake_client_queue(monkeypatch):
+    """Patch build_cloud_client with a :class:`FakeClientQueue`."""
+
+    def _install(payloads) -> FakeClientQueue:
+        client = FakeClientQueue(payloads)
+        monkeypatch.setattr(
+            summarizer_module, "build_cloud_client", lambda **kwargs: client
+        )
+        return client
+
+    return _install
+
+
+def _chunky_paper(word_count: int = 250) -> ResearchPaper:
+    text = " ".join(f"word{i}" for i in range(word_count))
+    return ResearchPaper(
+        title="Chunky Paper",
+        authors=["Ada Lovelace"],
+        abstract="This paper studies chunked summarization.",
+        keywords=["chunking", "summaries"],
+        section_headings=["1 Introduction", "2 Results"],
+        full_text=text,
+    )
+
+
+_CHUNK_PARTIAL = {
+    "tldr": "Partial chunk summary.",
+    "problem": "A local problem.",
+    "approach": "A local approach.",
+    "key_results": ["local result"],
+    "contributions": ["local contribution"],
+    "limitations": [],
+    "key_insights": ["local insight"],
+}
 
 
 @pytest.fixture
@@ -225,3 +281,100 @@ def test_build_cloud_client_uses_api_key(monkeypatch, no_dotenv):
         "secret-key" in str(value)
         for value in getattr(client, "_client", client).headers.values()
     )
+
+
+def test_summarize_full_returns_merged_summary(fake_client_queue):
+    fake_client_queue([_CHUNK_PARTIAL, _CHUNK_PARTIAL, _CHUNK_PARTIAL, _FULL_SUMMARY])
+    paper = _chunky_paper()
+    result = summarize_full(
+        paper,
+        words_per_chunk=100,
+        overlap_words=10,
+    )
+    assert result.summary.tldr == "A concise overview."
+    assert result.summary.key_results == ["BLEU 28.4", "+3% accuracy"]
+
+
+def test_summarize_full_calls_once_per_chunk_plus_merge(fake_client_queue):
+    client = fake_client_queue(
+        [_CHUNK_PARTIAL, _CHUNK_PARTIAL, _CHUNK_PARTIAL, _FULL_SUMMARY]
+    )
+    summarize_full(_chunky_paper(), words_per_chunk=100, overlap_words=10)
+    assert len(client.calls) == 4
+
+
+def test_summarize_full_chunk_prompts_contain_title_number_and_text(
+    fake_client_queue,
+):
+    client = fake_client_queue([_CHUNK_PARTIAL, _FULL_SUMMARY])
+    paper = ResearchPaper(title="My Title", full_text=" ".join(f"w{i}" for i in range(40)))
+    summarize_full(paper, words_per_chunk=50, overlap_words=5)
+    chunk_call = client.calls[0]
+    user_msg = chunk_call["messages"][-1]["content"]
+    assert "You are summarizing one chunk of a longer research paper." in user_msg
+    assert "Paper title:\nMy Title" in user_msg
+    assert "Chunk number:\n1" in user_msg
+    assert "Chunk text:\n" in user_msg
+    assert "w0" in user_msg
+
+
+def test_summarize_full_merge_prompt_contains_metadata_and_partials(
+    fake_client_queue,
+):
+    client = fake_client_queue(
+        [_CHUNK_PARTIAL, _CHUNK_PARTIAL, _CHUNK_PARTIAL, _FULL_SUMMARY]
+    )
+    paper = _chunky_paper(word_count=120)
+    summarize_full(paper, words_per_chunk=60, overlap_words=5)
+    merge_call = client.calls[-1]
+    user_msg = merge_call["messages"][-1]["content"]
+    assert "You are combining partial summaries from chunks of the same paper." in user_msg
+    assert "Metadata:" in user_msg
+    assert "Chunky Paper" in user_msg
+    assert "This paper studies chunked summarization." in user_msg
+    assert "Partial summaries:" in user_msg
+    assert "Partial chunk summary." in user_msg
+    assert "Use the abstract and metadata as anchors." in user_msg
+    assert "Do not invent limitations." in user_msg
+
+
+def test_summarize_full_does_not_mutate_input(fake_client_queue):
+    fake_client_queue([_CHUNK_PARTIAL, _CHUNK_PARTIAL, _FULL_SUMMARY])
+    paper = ResearchPaper(title="Stable", full_text=" ".join(f"w{i}" for i in range(40)))
+    summarize_full(paper, words_per_chunk=25, overlap_words=5)
+    assert paper.summary == PaperSummary()
+
+
+def test_summarize_full_preserves_other_fields(fake_client_queue):
+    fake_client_queue([_CHUNK_PARTIAL, _CHUNK_PARTIAL, _FULL_SUMMARY])
+    paper = ResearchPaper(
+        title="Stable",
+        authors=["Jane Doe"],
+        full_text=" ".join(f"w{i}" for i in range(40)),
+    )
+    result = summarize_full(paper, words_per_chunk=25, overlap_words=5)
+    assert replace(result, summary=PaperSummary()) == paper
+
+
+def test_summarize_full_empty_text_skips_llm(monkeypatch):
+    called = {"count": 0}
+
+    def fail_if_called(**kwargs):
+        called["count"] += 1
+        raise AssertionError("LLM should not be called for empty text")
+
+    monkeypatch.setattr(summarizer_module, "build_cloud_client", fail_if_called)
+    result = summarize_full(ResearchPaper(full_text=""))
+    assert result.summary == PaperSummary()
+    assert called["count"] == 0
+
+
+def test_summarize_full_forwards_model(fake_client_queue):
+    client = fake_client_queue([_CHUNK_PARTIAL, _CHUNK_PARTIAL, _FULL_SUMMARY])
+    summarize_full(
+        ResearchPaper(full_text=" ".join(f"w{i}" for i in range(40))),
+        model="gpt-oss:20b",
+        words_per_chunk=25,
+        overlap_words=5,
+    )
+    assert all(call["model"] == "gpt-oss:20b" for call in client.calls)

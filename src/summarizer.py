@@ -22,12 +22,18 @@ from __future__ import annotations
 import json
 import os
 import re
-from dataclasses import replace
+from dataclasses import asdict, replace
 from typing import Any
 
 from dotenv import load_dotenv
 from ollama import Client
 
+from src.chunking import (
+    DEFAULT_OVERLAP_WORDS,
+    DEFAULT_WORDS_PER_CHUNK,
+    TextChunk,
+    chunk_paper,
+)
 from src.paper import PaperSummary, ResearchPaper
 
 # Default cloud model. Other options include "gpt-oss:20b", "qwen3-coder:480b",
@@ -89,6 +95,35 @@ _SYSTEM_PROMPT = (
     "invent details not supported by the text."
 )
 
+_SCHEMA_FIELD_DESCRIPTIONS = (
+    "- 'tldr': 1-2 plain-English sentences on what the paper is about.\n"
+    "- 'problem': the problem or motivation it addresses.\n"
+    "- 'approach': the method or technique used.\n"
+    "- 'key_results': array of main findings; include concrete quantitative "
+    "metrics (e.g. scores, accuracy, speedups) when stated.\n"
+    "- 'contributions': array of the paper's novel contributions.\n"
+    "- 'limitations': array of caveats or weaknesses.\n"
+    "- 'key_insights': array of the most important standalone takeaways."
+)
+
+_CHUNK_SYSTEM_PROMPT = (
+    "You are a research assistant summarizing part of an academic paper. "
+    "Respond ONLY with JSON matching the requested schema:\n"
+    f"{_SCHEMA_FIELD_DESCRIPTIONS}\n"
+    "Use empty strings/arrays for fields the chunk does not support. Do not "
+    "invent details not supported by the chunk text."
+)
+
+_MERGE_SYSTEM_PROMPT = (
+    "You are a research assistant combining partial summaries of the same "
+    "paper into one coherent summary. Respond ONLY with JSON matching the "
+    "requested schema:\n"
+    f"{_SCHEMA_FIELD_DESCRIPTIONS}\n"
+    "Use empty strings/arrays when the combined evidence does not support a "
+    "field. Do not invent details not supported by the partial summaries or "
+    "metadata."
+)
+
 # Fields that are list-typed in PaperSummary (validated as such on parse).
 _LIST_FIELDS = ("key_results", "contributions", "limitations", "key_insights")
 _STR_FIELDS = ("tldr", "problem", "approach")
@@ -139,6 +174,57 @@ def _build_user_prompt(full_text: str) -> str:
         "Summarize the following research paper into the structured JSON "
         "summary described by the schema.\n\n"
         f"PAPER TEXT:\n{text}"
+    )
+
+
+def _build_chunk_user_prompt(paper: ResearchPaper, chunk: TextChunk) -> str:
+    """Build the user message for summarizing a single chunk."""
+    title = paper.title or "(untitled)"
+    return (
+        "You are summarizing one chunk of a longer research paper.\n\n"
+        f"Paper title:\n{title}\n\n"
+        f"Chunk number:\n{chunk.index + 1}\n\n"
+        f"Chunk text:\n{chunk.text}\n\n"
+        "Return structured JSON using the required schema.\n"
+        "Only include information supported by this chunk.\n"
+        "If a field is not present in this chunk, use an empty string or "
+        "empty list."
+    )
+
+
+def _format_paper_metadata(paper: ResearchPaper) -> str:
+    """Render paper metadata for merge prompts."""
+    authors = ", ".join(paper.authors) if paper.authors else "(none)"
+    keywords = ", ".join(paper.keywords) if paper.keywords else "(none)"
+    sections = ", ".join(paper.section_headings) if paper.section_headings else "(none)"
+    abstract = paper.abstract.strip() or "(none)"
+    return (
+        f"Title: {paper.title or '(untitled)'}\n"
+        f"Authors: {authors}\n"
+        f"Abstract: {abstract}\n"
+        f"Keywords: {keywords}\n"
+        f"Section headings: {sections}"
+    )
+
+
+def _build_merge_user_prompt(
+    paper: ResearchPaper, partial_summaries: list[PaperSummary]
+) -> str:
+    """Build the user message for merging chunk-level summaries."""
+    partials_json = json.dumps(
+        [asdict(summary) for summary in partial_summaries],
+        indent=2,
+        ensure_ascii=False,
+    )
+    return (
+        "You are combining partial summaries from chunks of the same paper.\n\n"
+        f"Metadata:\n{_format_paper_metadata(paper)}\n\n"
+        f"Partial summaries:\n{partials_json}\n\n"
+        "Use the abstract and metadata as anchors.\n"
+        "Remove duplicates.\n"
+        "Prefer specific results over vague statements.\n"
+        "Do not invent limitations.\n"
+        "Return one final structured JSON object."
     )
 
 
@@ -204,12 +290,8 @@ class OllamaSummarizer:
             self._client = build_cloud_client()
         return self._client
 
-    def summarize_text(self, full_text: str) -> PaperSummary:
-        """Return a :class:`PaperSummary` derived from ``full_text``."""
-        messages = [
-            {"role": "system", "content": _SYSTEM_PROMPT},
-            {"role": "user", "content": _build_user_prompt(full_text)},
-        ]
+    def _complete_summary(self, messages: list[dict[str, str]]) -> PaperSummary:
+        """Send ``messages`` to the model and parse a :class:`PaperSummary`."""
         response = self.client.chat(
             model=self.model,
             messages=messages,
@@ -217,14 +299,65 @@ class OllamaSummarizer:
             options={"temperature": _TEMPERATURE},
         )
         message = response.message
-        # "Thinking" models (e.g. gpt-oss) may return the answer in the
-        # ``thinking`` channel and leave ``content`` empty, so fall back to it.
         content = message.content or getattr(message, "thinking", "") or ""
         return _parse_response(content)
+
+    def summarize_text(self, full_text: str) -> PaperSummary:
+        """Return a :class:`PaperSummary` derived from ``full_text``."""
+        messages = [
+            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "user", "content": _build_user_prompt(full_text)},
+        ]
+        return self._complete_summary(messages)
+
+    def summarize_chunk(
+        self, paper: ResearchPaper, chunk: TextChunk
+    ) -> PaperSummary:
+        """Return a partial :class:`PaperSummary` for one chunk."""
+        messages = [
+            {"role": "system", "content": _CHUNK_SYSTEM_PROMPT},
+            {"role": "user", "content": _build_chunk_user_prompt(paper, chunk)},
+        ]
+        return self._complete_summary(messages)
+
+    def merge_summaries(
+        self, paper: ResearchPaper, partial_summaries: list[PaperSummary]
+    ) -> PaperSummary:
+        """Merge chunk-level summaries into one final :class:`PaperSummary`."""
+        messages = [
+            {"role": "system", "content": _MERGE_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": _build_merge_user_prompt(paper, partial_summaries),
+            },
+        ]
+        return self._complete_summary(messages)
 
     def summarize(self, paper: ResearchPaper) -> ResearchPaper:
         """Return a copy of ``paper`` with its ``summary`` filled in."""
         summary = self.summarize_text(paper.full_text)
+        return replace(paper, summary=summary)
+
+    def summarize_full(
+        self,
+        paper: ResearchPaper,
+        *,
+        words_per_chunk: int = DEFAULT_WORDS_PER_CHUNK,
+        overlap_words: int = DEFAULT_OVERLAP_WORDS,
+    ) -> ResearchPaper:
+        """Summarize the full paper via chunking, then merge partial summaries."""
+        chunks = chunk_paper(
+            paper,
+            words_per_chunk,
+            overlap_words=overlap_words,
+        )
+        if not chunks:
+            return replace(paper, summary=PaperSummary())
+
+        partial_summaries = [
+            self.summarize_chunk(paper, chunk) for chunk in chunks
+        ]
+        summary = self.merge_summaries(paper, partial_summaries)
         return replace(paper, summary=summary)
 
 
@@ -236,3 +369,18 @@ def summarize_text(full_text: str, *, model: str = DEFAULT_MODEL) -> PaperSummar
 def summarize(paper: ResearchPaper, *, model: str = DEFAULT_MODEL) -> ResearchPaper:
     """Convenience wrapper: summarize a paper with a one-off summarizer."""
     return OllamaSummarizer(model=model).summarize(paper)
+
+
+def summarize_full(
+    paper: ResearchPaper,
+    *,
+    model: str = DEFAULT_MODEL,
+    words_per_chunk: int = DEFAULT_WORDS_PER_CHUNK,
+    overlap_words: int = DEFAULT_OVERLAP_WORDS,
+) -> ResearchPaper:
+    """Convenience wrapper: chunk, summarize, and merge with a one-off summarizer."""
+    return OllamaSummarizer(model=model).summarize_full(
+        paper,
+        words_per_chunk=words_per_chunk,
+        overlap_words=overlap_words,
+    )

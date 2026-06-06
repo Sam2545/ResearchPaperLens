@@ -9,7 +9,7 @@ result as clean JSON.
 
 ResearchPaperLens extracts structured metadata from research-paper PDFs, saves
 the result as JSON, and can optionally generate an LLM summary and key insights
-using an Ollama cloud model (opt-in via `--summarize`).
+using an Ollama cloud model (opt-in via `--summarize` or `--summarize-full`).
 
 It does not currently perform semantic search, embeddings, RAG, or web
 deployment. Those capabilities are planned for later phases.
@@ -21,10 +21,15 @@ deployment. Those capabilities are planned for later phases.
 - Guesses title and authors
 - Extracts abstract and keywords when present
 - Detects section headings
+- Word-based chunking for long papers (`src/chunking.py`), with configurable
+  overlap between chunks
 - Optional LLM summarization: fills a structured `summary` (tldr, problem,
   approach, key results/metrics, contributions, limitations, key insights) via
-  an Ollama cloud model (opt-in with `--summarize`, model selectable with
-  `--model`)
+  an Ollama cloud model
+  - `--summarize` — single-pass summary (first ~12k characters of the paper)
+  - `--summarize-full` — chunks the full paper, summarizes each chunk, then
+    merges partial summaries into one final summary (recommended for long papers)
+  - Model selectable with `--model`
 - Saves structured results as JSON
 - Includes unit and integration tests
 
@@ -38,6 +43,7 @@ The pipeline is split into focused, independently testable modules:
 │   ├── paper.py        # ResearchPaper data model (dataclass)
 │   ├── pdf_reader.py   # PDF I/O: extract full text + page count
 │   ├── analyzer.py     # Pure analysis: text -> ResearchPaper fields
+│   ├── chunking.py     # Word-based text chunking with overlap
 │   ├── summarizer.py   # LLM summarizer (Ollama cloud): summary/key_insights
 │   └── storage.py      # Serialize ResearchPaper <-> JSON
 ├── data/               # Input PDFs
@@ -52,11 +58,20 @@ Data flows in one direction:
 
 ```
 PDF --(pdf_reader)--> text + page count --(analyzer)--> ResearchPaper --(storage)--> JSON
+                                                              |
+                                         optional --(summarizer)--> summary
+                                                              |
+                              --summarize-full--> chunking --> per-chunk summaries --> merge
 ```
 
 `analyzer.py` is deliberately decoupled from PDF reading: it only accepts
 already-extracted text, which keeps the analysis logic easy to test and reusable
 for any text source.
+
+For `--summarize-full`, `chunking.py` splits `full_text` into fixed-size word
+chunks (default 1500 words, 150-word overlap). The summarizer processes each
+chunk, then merges the partial summaries using paper metadata (title, abstract,
+etc.) as anchors.
 
 ## Setup
 
@@ -71,7 +86,7 @@ pip install -r requirements.txt
 ### Summarization (optional)
 
 LLM summarization uses [Ollama cloud models](https://docs.ollama.com/cloud) via
-the cloud API. To use `--summarize`, create an API key at
+the cloud API. To use `--summarize` or `--summarize-full`, create an API key at
 [ollama.com/settings/keys](https://ollama.com/settings/keys) and provide it as
 the `OLLAMA_API_KEY` environment variable.
 
@@ -89,8 +104,8 @@ Alternatively, export it in your shell:
 export OLLAMA_API_KEY=your_api_key
 ```
 
-The key is only required when running with `--summarize`; the rest of the
-pipeline works without it.
+The key is only required when running with `--summarize` or `--summarize-full`;
+the rest of the pipeline works without it.
 
 ## Usage
 
@@ -109,18 +124,26 @@ python main.py path/to/paper.pdf -o results/paper.json
 # Summarize with an Ollama cloud model (requires OLLAMA_API_KEY)
 python main.py path/to/paper.pdf --summarize
 
+# Full-paper summarization via chunking + merge (recommended for long papers)
+python main.py path/to/paper.pdf --summarize-full
+
 # Switch the cloud model used for summarization
-python main.py path/to/paper.pdf --summarize --model gpt-oss:20b
+python main.py path/to/paper.pdf --summarize-full --model gpt-oss:20b
 ```
 
 See all options with `python main.py --help`.
 
-> **Note:** `--summarize` calls an Ollama cloud model to populate
-> `summary`/`key_insights` and requires `OLLAMA_API_KEY` to be set. The model
-> defaults to `gpt-oss:120b` and can be changed with `--model`; other options
-> include `gpt-oss:20b`, `qwen3-coder:480b`, and `deepseek-v3.1:671b` (see
-> [Ollama cloud models](https://ollama.com/search?c=cloud)). `--model` has no
-> effect without `--summarize`.
+> **Note:** `--summarize` and `--summarize-full` are mutually exclusive. Both
+> require `OLLAMA_API_KEY`. The model defaults to `gpt-oss:120b` and can be
+> changed with `--model`; other options include `gpt-oss:20b`, `qwen3-coder:480b`,
+> and `deepseek-v3.1:671b` (see
+> [Ollama cloud models](https://ollama.com/search?c=cloud)).
+>
+> - **`--summarize`** — one API call; sends only the first ~12k characters of
+>   the paper (fast, but may miss later sections on long papers).
+> - **`--summarize-full`** — multiple API calls (one per chunk plus a merge
+>   step); covers the entire paper via word-based chunking (default 1500 words
+>   per chunk, 150-word overlap).
 
 You can also use the pieces directly in Python:
 
@@ -128,10 +151,16 @@ You can also use the pieces directly in Python:
 from src.pdf_reader import read_pdf
 from src.analyzer import analyze
 from src.storage import save_paper, load_paper
+from src.summarizer import summarize, summarize_full
 
 full_text, page_count = read_pdf("data/AttentionIsAllYouNeed.pdf")
 paper = analyze(full_text=full_text, page_count=page_count,
                 source_path="data/AttentionIsAllYouNeed.pdf")
+
+# Optional: single-pass or full-paper summarization (requires OLLAMA_API_KEY)
+# paper = summarize(paper)
+# paper = summarize_full(paper)
+
 save_paper(paper, "outputs/paper.json")
 
 paper = load_paper("outputs/paper.json")  # round-trips back into a ResearchPaper
@@ -172,8 +201,8 @@ Currently derived: `title`, `authors`, `abstract`, `keywords`, `section_headings
 `page_count`, `word_count`, `full_text`, `source_path`. The remaining fields
 (`references`, `doi`, `publication_year`, `venue`) are reserved and left at their
 defaults for now. `summary` is a structured object (a "summary card") populated
-by the LLM summarizer when `--summarize` is passed; otherwise its fields stay
-empty. Its fields are:
+by the LLM summarizer when `--summarize` or `--summarize-full` is passed;
+otherwise its fields stay empty. Its fields are:
 
 - `tldr` - a 1-2 sentence plain-English overview
 - `problem` - the problem or motivation the paper addresses
@@ -193,9 +222,11 @@ empty. Its fields are:
 - Keywords are only extracted when the paper has an explicit `Keywords` /
   `Index Terms` line; otherwise the field is left empty.
 - `references`, `doi`, `publication_year`, and `venue` are not yet extracted.
-- Summarization sends only the first ~12k characters of the paper to the model
-  (to stay within context limits), so very long papers are summarized from their
-  earlier sections.
+- `--summarize` sends only the first ~12k characters of the paper to the model,
+  so very long papers may miss content from later sections. Use
+  `--summarize-full` for full-paper coverage (at the cost of more API calls).
+- `--summarize-full` makes one API call per chunk plus a final merge call; long
+  papers take longer and cost more than `--summarize`.
 
 ## Tests
 
@@ -209,7 +240,9 @@ python -m pytest tests/integration
 ```
 
 Unit tests are fully offline: the summarizer tests patch the Ollama network
-boundary, so no API key or network access is needed. There is also a live API
-integration test (`tests/integration/test_summarizer_live_api.py`) that calls a
-real Ollama cloud model; it is skipped automatically unless `OLLAMA_API_KEY` is
-set (e.g. via `.env`).
+boundary, so no API key or network access is needed. Live API integration tests
+call a real Ollama cloud model and are skipped automatically unless
+`OLLAMA_API_KEY` is set (e.g. via `.env`):
+
+- `tests/integration/test_summarizer_live_api.py` — single-pass `--summarize`
+- `tests/integration/test_summarizer_full_live_api.py` — chunked `--summarize-full`
