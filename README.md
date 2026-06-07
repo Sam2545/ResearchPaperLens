@@ -275,3 +275,5 @@ call a real Ollama cloud model and are skipped automatically unless
 
 - `tests/integration/test_summarizer_live_api.py` — single-pass `--summarize`
 - `tests/integration/test_summarizer_full_live_api.py` — chunked `--summarize-full`
+- `tests/integration/test_retrieval_live_api.py` — hybrid-chunk indexing + semantic search
+  (cloud embed when authorized, otherwise local `nomic-embed-text`)
