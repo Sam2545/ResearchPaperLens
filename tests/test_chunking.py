@@ -2,15 +2,21 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from src.analyzer import count_words
 from src.chunking import (
+    ABSTRACT_SECTION_HEADING,
     DEFAULT_OVERLAP_WORDS,
     DEFAULT_WORDS_PER_CHUNK,
+    PREAMBLE_SECTION_HEADING,
     TextChunk,
     chunk_paper,
     chunk_text,
+    plan_hybrid_chunks,
+    split_into_sections,
 )
 from src.paper import ResearchPaper
 
@@ -287,3 +293,121 @@ def test_chunk_paper_forwards_overlap():
     chunks = chunk_paper(paper, words_per_chunk=5, overlap_words=2)
     assert len(chunks) == 3
     assert chunks[1].start_word == 3
+
+
+PDF_PATH = Path(__file__).resolve().parent.parent / "data" / "AttentionIsAllYouNeed.pdf"
+
+ATTENTION_TOP_LEVEL_SECTIONS = [
+    "1 Introduction",
+    "2 Background",
+    "3 Model Architecture",
+    "4 Why Self-Attention",
+    "5 Training",
+    "6 Results",
+    "7 Conclusion",
+]
+
+
+@pytest.fixture(scope="module")
+def attention_paper() -> ResearchPaper:
+    from src.analyzer import analyze
+    from src.pdf_reader import read_pdf
+
+    full_text, page_count = read_pdf(PDF_PATH)
+    return analyze(
+        full_text=full_text,
+        page_count=page_count,
+        source_path=str(PDF_PATH),
+    )
+
+
+def test_attention_pdf_exists():
+    assert PDF_PATH.is_file()
+
+
+def test_attention_split_includes_abstract_and_preamble(attention_paper):
+    sections = split_into_sections(attention_paper)
+    headings = [section.heading for section in sections]
+    assert headings[0] == ABSTRACT_SECTION_HEADING
+    assert headings[1] == PREAMBLE_SECTION_HEADING
+
+
+def test_attention_split_finds_all_top_level_sections(attention_paper):
+    sections = split_into_sections(attention_paper)
+    numbered = [s.heading for s in sections if s.heading in ATTENTION_TOP_LEVEL_SECTIONS]
+    assert numbered == ATTENTION_TOP_LEVEL_SECTIONS
+
+
+def test_attention_sections_are_ordered_by_position(attention_paper):
+    sections = split_into_sections(attention_paper)
+    numbered = [s for s in sections if s.heading in ATTENTION_TOP_LEVEL_SECTIONS]
+    starts = [section.start_char for section in numbered]
+    assert starts == sorted(starts)
+    assert all(start >= 0 for start in starts)
+
+
+def test_attention_numbered_sections_are_contiguous(attention_paper):
+    sections = split_into_sections(attention_paper)
+    numbered = [s for s in sections if s.heading in ATTENTION_TOP_LEVEL_SECTIONS]
+    for current, nxt in zip(numbered, numbered[1:]):
+        assert current.end_char == nxt.start_char
+
+
+def test_attention_section_text_starts_with_heading(attention_paper):
+    sections = split_into_sections(attention_paper)
+    for section in sections:
+        if section.heading in ATTENTION_TOP_LEVEL_SECTIONS:
+            assert section.text.lstrip().startswith(section.heading)
+
+
+def test_attention_abstract_section_uses_analyzer_abstract(attention_paper):
+    sections = split_into_sections(attention_paper)
+    abstract = next(s for s in sections if s.heading == ABSTRACT_SECTION_HEADING)
+    assert abstract.text == attention_paper.abstract.strip()
+    assert abstract.word_count > 100
+
+
+def test_attention_results_section_contains_metrics(attention_paper):
+    sections = split_into_sections(attention_paper)
+    results = next(s for s in sections if s.heading == "6 Results")
+    assert "BLEU" in results.text
+    assert results.word_count > 500
+
+
+def test_attention_introduction_section_has_expected_content(attention_paper):
+    sections = split_into_sections(attention_paper)
+    intro = next(s for s in sections if s.heading == "1 Introduction")
+    assert "Transformer" in intro.text
+    assert intro.word_count > 100
+
+
+def test_attention_hybrid_plan_subdivides_long_sections(attention_paper):
+    plans = plan_hybrid_chunks(attention_paper)
+    by_heading = {plan.section.heading: plan for plan in plans}
+    assert len(by_heading["3 Model Architecture"].chunks) >= 2
+    assert len(by_heading["7 Conclusion"].chunks) >= 2
+    assert len(by_heading["6 Results"].chunks) == 1
+    assert len(by_heading["1 Introduction"].chunks) == 1
+
+
+def test_attention_hybrid_subchunks_preserve_section_word_offsets(attention_paper):
+    plans = plan_hybrid_chunks(attention_paper)
+    model_plan = next(
+        p for p in plans if p.section.heading == "3 Model Architecture"
+    )
+    section = model_plan.section
+    assert len(model_plan.chunks) >= 2
+    assert model_plan.chunks[0].start_word == section.start_word
+    assert model_plan.chunks[-1].end_word == section.end_word
+
+
+def test_split_without_preamble_or_abstract(attention_paper):
+    sections = split_into_sections(
+        attention_paper,
+        include_abstract=False,
+        include_preamble=False,
+    )
+    headings = [section.heading for section in sections]
+    assert ABSTRACT_SECTION_HEADING not in headings
+    assert PREAMBLE_SECTION_HEADING not in headings
+    assert headings == ATTENTION_TOP_LEVEL_SECTIONS

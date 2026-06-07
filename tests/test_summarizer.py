@@ -288,6 +288,7 @@ def test_summarize_full_returns_merged_summary(fake_client_queue):
     paper = _chunky_paper()
     result = summarize_full(
         paper,
+        strategy="flat",
         words_per_chunk=100,
         overlap_words=10,
     )
@@ -299,7 +300,7 @@ def test_summarize_full_calls_once_per_chunk_plus_merge(fake_client_queue):
     client = fake_client_queue(
         [_CHUNK_PARTIAL, _CHUNK_PARTIAL, _CHUNK_PARTIAL, _FULL_SUMMARY]
     )
-    summarize_full(_chunky_paper(), words_per_chunk=100, overlap_words=10)
+    summarize_full(_chunky_paper(), strategy="flat", words_per_chunk=100, overlap_words=10)
     assert len(client.calls) == 4
 
 
@@ -308,7 +309,7 @@ def test_summarize_full_chunk_prompts_contain_title_number_and_text(
 ):
     client = fake_client_queue([_CHUNK_PARTIAL, _FULL_SUMMARY])
     paper = ResearchPaper(title="My Title", full_text=" ".join(f"w{i}" for i in range(40)))
-    summarize_full(paper, words_per_chunk=50, overlap_words=5)
+    summarize_full(paper, strategy="flat", words_per_chunk=50, overlap_words=5)
     chunk_call = client.calls[0]
     user_msg = chunk_call["messages"][-1]["content"]
     assert "You are summarizing one chunk of a longer research paper." in user_msg
@@ -325,7 +326,7 @@ def test_summarize_full_merge_prompt_contains_metadata_and_partials(
         [_CHUNK_PARTIAL, _CHUNK_PARTIAL, _CHUNK_PARTIAL, _FULL_SUMMARY]
     )
     paper = _chunky_paper(word_count=120)
-    summarize_full(paper, words_per_chunk=60, overlap_words=5)
+    summarize_full(paper, strategy="flat", words_per_chunk=60, overlap_words=5)
     merge_call = client.calls[-1]
     user_msg = merge_call["messages"][-1]["content"]
     assert "You are combining partial summaries from chunks of the same paper." in user_msg
@@ -341,7 +342,7 @@ def test_summarize_full_merge_prompt_contains_metadata_and_partials(
 def test_summarize_full_does_not_mutate_input(fake_client_queue):
     fake_client_queue([_CHUNK_PARTIAL, _CHUNK_PARTIAL, _FULL_SUMMARY])
     paper = ResearchPaper(title="Stable", full_text=" ".join(f"w{i}" for i in range(40)))
-    summarize_full(paper, words_per_chunk=25, overlap_words=5)
+    summarize_full(paper, strategy="flat", words_per_chunk=25, overlap_words=5)
     assert paper.summary == PaperSummary()
 
 
@@ -352,7 +353,7 @@ def test_summarize_full_preserves_other_fields(fake_client_queue):
         authors=["Jane Doe"],
         full_text=" ".join(f"w{i}" for i in range(40)),
     )
-    result = summarize_full(paper, words_per_chunk=25, overlap_words=5)
+    result = summarize_full(paper, strategy="flat", words_per_chunk=25, overlap_words=5)
     assert replace(result, summary=PaperSummary()) == paper
 
 
@@ -373,8 +374,77 @@ def test_summarize_full_forwards_model(fake_client_queue):
     client = fake_client_queue([_CHUNK_PARTIAL, _CHUNK_PARTIAL, _FULL_SUMMARY])
     summarize_full(
         ResearchPaper(full_text=" ".join(f"w{i}" for i in range(40))),
+        strategy="flat",
         model="gpt-oss:20b",
         words_per_chunk=25,
         overlap_words=5,
     )
     assert all(call["model"] == "gpt-oss:20b" for call in client.calls)
+
+
+def _sectioned_paper(*, long_section_words: int = 30) -> ResearchPaper:
+    intro = "1 Introduction\n" + " ".join(f"intro{i}" for i in range(30))
+    results = "6 Results\n" + " ".join(f"result{i}" for i in range(long_section_words))
+    full_text = f"{intro}\n\n{results}"
+    return ResearchPaper(
+        title="Sectioned Paper",
+        abstract="Studies chunked summarization with BLEU 99.0.",
+        full_text=full_text,
+        section_headings=["1 Introduction", "6 Results"],
+    )
+
+
+def test_summarize_full_hybrid_returns_merged_summary(fake_client_queue):
+    # Abstract + 2 short sections + final merge = 4 calls
+    fake_client_queue(
+        [_CHUNK_PARTIAL, _CHUNK_PARTIAL, _CHUNK_PARTIAL, _FULL_SUMMARY]
+    )
+    result = summarize_full(_sectioned_paper(), strategy="hybrid")
+    assert result.summary.tldr == "A concise overview."
+
+
+def test_summarize_full_hybrid_uses_section_and_final_merge_prompts(
+    fake_client_queue,
+):
+    client = fake_client_queue(
+        [_CHUNK_PARTIAL, _CHUNK_PARTIAL, _CHUNK_PARTIAL, _FULL_SUMMARY]
+    )
+    summarize_full(_sectioned_paper(), strategy="hybrid")
+    section_call = client.calls[1]
+    final_call = client.calls[-1]
+    assert "summarizing one section" in section_call["messages"][-1]["content"]
+    assert "Section:\n1 Introduction" in section_call["messages"][-1]["content"]
+    assert "combining section summaries" in final_call["messages"][-1]["content"]
+
+
+def test_summarize_full_hybrid_subdivides_long_section(fake_client_queue):
+    # Abstract + intro section + 2 result chunks + section merge + final = 6
+    client = fake_client_queue(
+        [
+            _CHUNK_PARTIAL,
+            _CHUNK_PARTIAL,
+            _CHUNK_PARTIAL,
+            _CHUNK_PARTIAL,
+            _CHUNK_PARTIAL,
+            _FULL_SUMMARY,
+        ]
+    )
+    summarize_full(
+        _sectioned_paper(long_section_words=80),
+        strategy="hybrid",
+        max_section_words=50,
+        words_per_chunk=50,
+        overlap_words=5,
+    )
+    chunk_call = client.calls[2]
+    section_merge_call = client.calls[4]
+    assert "Section:\n6 Results" in chunk_call["messages"][-1]["content"]
+    assert "Chunk number:\n1 of 2" in chunk_call["messages"][-1]["content"]
+    assert "combining partial chunk summaries" in section_merge_call["messages"][-1]["content"]
+    assert "Section:\n6 Results" in section_merge_call["messages"][-1]["content"]
+    assert len(client.calls) == 6
+
+
+def test_summarize_full_invalid_strategy_raises():
+    with pytest.raises(ValueError, match="strategy must be"):
+        summarize_full(ResearchPaper(full_text="hello world"), strategy="nope")

@@ -35,9 +35,9 @@ def process_pdf(
     before saving, populating the structured ``summary`` on the stored paper
     using the given Ollama cloud ``model``.
 
-    When ``summarize_full_paper`` is true, the paper is chunked and each chunk
-    is summarized before the partial summaries are merged into the final
-    ``summary``. ``summarize_paper`` and ``summarize_full_paper`` must not both
+    When ``summarize_full_paper`` is true, the paper is split into sections,
+    each section is summarized (with word chunking for long sections), and
+    the section summaries are merged into the final ``summary``. ``summarize_paper`` and ``summarize_full_paper`` must not both
     be true.
     """
     if summarize_paper and summarize_full_paper:
@@ -88,8 +88,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--summarize-full",
         action="store_true",
         help=(
-            "Chunk the full paper, summarize each chunk, merge into a final "
-            "structured summary, then save."
+            "Section-aware hybrid summarization: split by section, summarize "
+            "each section (word-chunking long ones), merge, then save."
         ),
     )
     parser.add_argument(

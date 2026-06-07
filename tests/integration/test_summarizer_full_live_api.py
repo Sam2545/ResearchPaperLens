@@ -1,7 +1,8 @@
-Live integration test for full-paper chunked summarization."""Live integration test for full-paper chunked summarization.
+"""Live integration test for full-paper hybrid section summarization.
 
-Calls the real Ollama cloud API to chunk a paper, summarize each chunk, and
-merge the partial summaries. Skipped unless ``OLLAMA_API_KEY`` is available.
+Calls the real Ollama cloud API to split a paper into sections, summarize
+each section (subdividing long ones with word chunks), and merge into a final
+summary. Skipped unless ``OLLAMA_API_KEY`` is available.
 """
 
 from __future__ import annotations
@@ -12,7 +13,7 @@ import pytest
 from dotenv import load_dotenv
 
 from src.analyzer import analyze
-from src.chunking import chunk_paper
+from src.chunking import plan_hybrid_chunks
 from src.paper import PaperSummary
 from src.pdf_reader import read_pdf
 from src.summarizer import API_KEY_ENV, summarize_full
@@ -30,27 +31,33 @@ PDF_PATH = (
     / "AttentionIsAllYouNeed.pdf"
 )
 
-# Keep chunk count modest so the live test stays reasonably fast.
+LIVE_MAX_SECTION_WORDS = 1200
 LIVE_WORDS_PER_CHUNK = 1200
 LIVE_OVERLAP_WORDS = 100
 
 
-def test_live_summarize_full_produces_coherent_summary():
+def test_live_summarize_full_hybrid_produces_coherent_summary():
     full_text, page_count = read_pdf(PDF_PATH)
     paper = analyze(
         full_text=full_text,
         page_count=page_count,
         source_path=str(PDF_PATH),
     )
-    chunks = chunk_paper(
+    plans = plan_hybrid_chunks(
         paper,
-        LIVE_WORDS_PER_CHUNK,
+        max_section_words=LIVE_MAX_SECTION_WORDS,
+        words_per_chunk=LIVE_WORDS_PER_CHUNK,
         overlap_words=LIVE_OVERLAP_WORDS,
     )
-    assert len(chunks) >= 2, "expected multiple chunks for a full-paper test"
+    assert len(plans) >= 3, "expected multiple hybrid sections for a full-paper test"
+    assert any(
+        plan.section.heading == "6 Results" for plan in plans
+    ), "expected a Results section in the hybrid plan"
 
     result = summarize_full(
         paper,
+        strategy="hybrid",
+        max_section_words=LIVE_MAX_SECTION_WORDS,
         words_per_chunk=LIVE_WORDS_PER_CHUNK,
         overlap_words=LIVE_OVERLAP_WORDS,
     )

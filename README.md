@@ -27,8 +27,9 @@ deployment. Those capabilities are planned for later phases.
   approach, key results/metrics, contributions, limitations, key insights) via
   an Ollama cloud model
   - `--summarize` — single-pass summary (first ~12k characters of the paper)
-  - `--summarize-full` — chunks the full paper, summarizes each chunk, then
-    merges partial summaries into one final summary (recommended for long papers)
+  - `--summarize-full` — section-aware hybrid summarization: split by section,
+    word-chunk long sections, merge section summaries into a final summary
+    (recommended for long papers)
   - Model selectable with `--model`
 - Saves structured results as JSON
 - Includes unit and integration tests
@@ -61,17 +62,18 @@ PDF --(pdf_reader)--> text + page count --(analyzer)--> ResearchPaper --(storage
                                                               |
                                          optional --(summarizer)--> summary
                                                               |
-                              --summarize-full--> chunking --> per-chunk summaries --> merge
+                              --summarize-full--> sections --> per-section summaries --> merge
 ```
 
 `analyzer.py` is deliberately decoupled from PDF reading: it only accepts
 already-extracted text, which keeps the analysis logic easy to test and reusable
 for any text source.
 
-For `--summarize-full`, `chunking.py` splits `full_text` into fixed-size word
-chunks (default 1500 words, 150-word overlap). The summarizer processes each
-chunk, then merges the partial summaries using paper metadata (title, abstract,
-etc.) as anchors.
+For `--summarize-full`, `chunking.py` splits the paper into top-level sections
+(Abstract, Preamble, numbered sections). Sections longer than 1,200 words are
+subdivided with fixed-word chunks (with overlap). The summarizer summarizes each
+section (merging sub-chunks when needed), then merges section summaries into the
+final structured summary using paper metadata as anchors.
 
 ## Setup
 
@@ -141,9 +143,10 @@ See all options with `python main.py --help`.
 >
 > - **`--summarize`** — one API call; sends only the first ~12k characters of
 >   the paper (fast, but may miss later sections on long papers).
-> - **`--summarize-full`** — multiple API calls (one per chunk plus a merge
->   step); covers the entire paper via word-based chunking (default 1500 words
->   per chunk, 150-word overlap).
+> - **`--summarize-full`** — hierarchical hybrid summarization (default
+>   strategy): split by section, word-chunk sections over 1,200 words, summarize
+>   each section, merge into a final summary. Multiple API calls (more than
+>   `--summarize`, but covers the full paper with better structure).
 
 You can also use the pieces directly in Python:
 
