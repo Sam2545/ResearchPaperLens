@@ -16,6 +16,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import src.ollama_client as ollama_client_module
 import src.summarizer as summarizer_module
 from src.paper import PaperSummary, ResearchPaper
 from src.summarizer import (
@@ -136,7 +137,7 @@ _CHUNK_PARTIAL = {
 @pytest.fixture
 def no_dotenv(monkeypatch):
     """Stop build_cloud_client from reading a real local .env during tests."""
-    monkeypatch.setattr(summarizer_module, "load_dotenv", lambda *a, **k: False)
+    monkeypatch.setattr(ollama_client_module, "load_dotenv", lambda *a, **k: False)
 
 
 def test_summarize_text_parses_full_structured_summary(fake_client):

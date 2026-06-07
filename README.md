@@ -11,7 +11,7 @@ ResearchPaperLens extracts structured metadata from research-paper PDFs, saves
 the result as JSON, and can optionally generate an LLM summary and key insights
 using an Ollama cloud model (opt-in via `--summarize` or `--summarize-full`).
 
-It does not currently perform semantic search, embeddings, RAG, or web
+It does not currently expose retrieval via the CLI, full RAG Q&A, or web
 deployment. Those capabilities are planned for later phases.
 
 ## Features
@@ -31,6 +31,9 @@ deployment. Those capabilities are planned for later phases.
     word-chunk long sections, merge section summaries into a final summary
     (recommended for long papers)
   - Model selectable with `--model`
+- Semantic retrieval foundation (library API): hybrid-chunk embeddings via
+  Ollama cloud (`nomic-embed-text`), per-paper chunk JSON stores, and in-memory
+  cosine search (`src/retrieval.py`)
 - Saves structured results as JSON
 - Includes unit and integration tests
 
@@ -45,6 +48,11 @@ The pipeline is split into focused, independently testable modules:
 │   ├── pdf_reader.py   # PDF I/O: extract full text + page count
 │   ├── analyzer.py     # Pure analysis: text -> ResearchPaper fields
 │   ├── chunking.py     # Word-based text chunking with overlap
+│   ├── ollama_client.py # Shared Ollama cloud client (API key)
+│   ├── embeddings.py   # Ollama cloud text embeddings
+│   ├── chunk_store.py  # Indexed chunks + JSON persistence
+│   ├── vector_index.py # In-memory cosine similarity search
+│   ├── retrieval.py    # index_paper() and search() orchestration
 │   ├── summarizer.py   # LLM summarizer (Ollama cloud): summary/key_insights
 │   └── storage.py      # Serialize ResearchPaper <-> JSON
 ├── data/               # Input PDFs
@@ -167,6 +175,24 @@ paper = analyze(full_text=full_text, page_count=page_count,
 save_paper(paper, "outputs/paper.json")
 
 paper = load_paper("outputs/paper.json")  # round-trips back into a ResearchPaper
+```
+
+### Semantic retrieval (library API)
+
+Index hybrid chunks (Abstract + numbered sections) and search them in memory.
+Requires `OLLAMA_API_KEY` for embedding calls. Chunk indexes are saved as
+`outputs/<pdf-stem>.chunks.json` alongside the paper JSON.
+
+```python
+from src.retrieval import index_paper, search
+from src.chunk_store import save_chunk_store, default_chunk_store_path
+
+store = index_paper(paper)
+save_chunk_store(store, default_chunk_store_path(paper))
+
+results = search(store, "What BLEU scores were reported?", top_k=3)
+for hit in results:
+    print(hit.score, hit.chunk.section_heading)
 ```
 
 ## Output format

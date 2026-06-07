@@ -20,12 +20,10 @@ and get back a new one with the summary fields populated.
 from __future__ import annotations
 
 import json
-import os
 import re
 from dataclasses import asdict, replace
 from typing import Any
 
-from dotenv import load_dotenv
 from ollama import Client
 
 from src.chunking import (
@@ -39,16 +37,11 @@ from src.chunking import (
     plan_hybrid_chunks,
 )
 from src.paper import PaperSummary, ResearchPaper
+from src.ollama_client import API_KEY_ENV, OLLAMA_CLOUD_HOST, build_cloud_client
 
 # Default cloud model. Other options include "gpt-oss:20b", "qwen3-coder:480b",
 # and "deepseek-v3.1:671b"; see https://ollama.com/search?c=cloud.
 DEFAULT_MODEL = "gpt-oss:120b"
-
-# Ollama cloud endpoint used for direct API access.
-OLLAMA_CLOUD_HOST = "https://ollama.com"
-
-# Environment variable holding the ollama.com API key.
-API_KEY_ENV = "OLLAMA_API_KEY"
 
 # Cap on how much paper text we send to the model. Research papers can be very
 # long; sending the whole thing wastes tokens and can exceed context limits.
@@ -167,31 +160,6 @@ _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*\})\s*```", re.DOTALL)
 
 class SummarizationError(RuntimeError):
     """Raised when the model response cannot be turned into summary fields."""
-
-
-def build_cloud_client(
-    *,
-    host: str = OLLAMA_CLOUD_HOST,
-    api_key: str | None = None,
-) -> "Client":
-    """Build an Ollama client pointed at the cloud API.
-
-    The API key is read from the ``api_key`` argument or, if omitted, the
-    ``OLLAMA_API_KEY`` environment variable (loaded from a local ``.env`` file
-    if present). Raises :class:`RuntimeError` with a clear message if no key is
-    available. This is the only place that reads the environment or constructs a
-    real network client.
-    """
-    if api_key is None:
-        load_dotenv()
-    key = api_key if api_key is not None else os.environ.get(API_KEY_ENV)
-    if not key:
-        raise RuntimeError(
-            f"{API_KEY_ENV} is not set. Create an API key at "
-            "https://ollama.com/settings/keys and export it, e.g. "
-            f"`export {API_KEY_ENV}=your_api_key`."
-        )
-    return Client(host=host, headers={"Authorization": f"Bearer {key}"})
 
 
 def _build_user_prompt(full_text: str) -> str:

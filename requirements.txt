@@ -2,3 +2,4 @@ pdfplumber
 pytest
 ollama
 python-dotenv
+numpy
