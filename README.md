@@ -11,8 +11,8 @@ ResearchPaperLens extracts structured metadata from research-paper PDFs, saves
 the result as JSON, and can optionally generate an LLM summary and key insights
 using an Ollama cloud model (opt-in via `--summarize` or `--summarize-full`).
 
-It does not currently expose retrieval via the CLI, full RAG Q&A, or web
-deployment. Those capabilities are planned for later phases.
+It does not currently perform RAG Q&A or web deployment. Those capabilities are
+planned for later phases.
 
 ## Features
 
@@ -31,9 +31,9 @@ deployment. Those capabilities are planned for later phases.
     word-chunk long sections, merge section summaries into a final summary
     (recommended for long papers)
   - Model selectable with `--model`
-- Semantic retrieval foundation (library API): hybrid-chunk embeddings via
-  Ollama cloud (`nomic-embed-text`), per-paper chunk JSON stores, and in-memory
-  cosine search (`src/retrieval.py`)
+- Semantic retrieval: hybrid-chunk embeddings via Ollama (`nomic-embed-text`),
+  per-paper chunk JSON stores, in-memory cosine search, CLI `--index` /
+  `--search`
 - Saves structured results as JSON
 - Includes unit and integration tests
 
@@ -139,6 +139,17 @@ python main.py path/to/paper.pdf --summarize-full
 
 # Switch the cloud model used for summarization
 python main.py path/to/paper.pdf --summarize-full --model gpt-oss:20b
+
+# Build a semantic chunk index (embed + save outputs/<pdf-stem>.chunks.json)
+python main.py path/to/paper.pdf --index
+
+# Search an existing chunk index
+python main.py --search "What BLEU scores were reported?" \
+  --from outputs/AttentionIsAllYouNeed.chunks.json
+
+# Show more search hits
+python main.py --search "multi-head attention" \
+  --from outputs/AttentionIsAllYouNeed.chunks.json --top-k 10
 ```
 
 See all options with `python main.py --help`.
@@ -155,6 +166,11 @@ See all options with `python main.py --help`.
 >   strategy): split by section, word-chunk sections over 1,200 words, summarize
 >   each section, merge into a final summary. Multiple API calls (more than
 >   `--summarize`, but covers the full paper with better structure).
+> - **`--index`** — embeds hybrid section chunks and writes a chunk index JSON.
+>   Tries Ollama cloud first; if `/api/embed` is unauthorized, falls back to a
+>   local Ollama daemon (run `ollama pull nomic-embed-text`).
+> - **`--search`** — loads a chunk index from `--from` and prints ranked matches
+>   (section, score, text snippet). Does not require a PDF argument.
 
 You can also use the pieces directly in Python:
 
@@ -177,20 +193,29 @@ save_paper(paper, "outputs/paper.json")
 paper = load_paper("outputs/paper.json")  # round-trips back into a ResearchPaper
 ```
 
-### Semantic retrieval (library API)
+### Semantic retrieval (CLI or library)
 
 Index hybrid chunks (Abstract + numbered sections) and search them in memory.
-Requires `OLLAMA_API_KEY` for embedding calls. Chunk indexes are saved as
-`outputs/<pdf-stem>.chunks.json` alongside the paper JSON.
+Chunk indexes are saved as `outputs/<pdf-stem>.chunks.json`.
+
+```bash
+python main.py data/AttentionIsAllYouNeed.pdf --index
+python main.py --search "What BLEU scores were reported?" \
+  --from outputs/AttentionIsAllYouNeed.chunks.json
+```
+
+Or from Python:
 
 ```python
 from src.retrieval import index_paper, search
+from src.embeddings import resolve_embed_client
 from src.chunk_store import save_chunk_store, default_chunk_store_path
 
-store = index_paper(paper)
+client = resolve_embed_client()
+store = index_paper(paper, client=client)
 save_chunk_store(store, default_chunk_store_path(paper))
 
-results = search(store, "What BLEU scores were reported?", top_k=3)
+results = search(store, "What BLEU scores were reported?", client=client, top_k=3)
 for hit in results:
     print(hit.score, hit.chunk.section_heading)
 ```

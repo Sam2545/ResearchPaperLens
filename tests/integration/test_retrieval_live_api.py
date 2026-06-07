@@ -4,10 +4,8 @@ Indexes the bundled Attention paper with hybrid section chunks, embeds them
 through Ollama, and checks that a BLEU-focused query retrieves content from
 the Results section.
 
-Tries the Ollama cloud API first when ``OLLAMA_API_KEY`` is set, then falls
-back to a local Ollama daemon at ``http://127.0.0.1:11434``. If neither can
-embed with ``nomic-embed-text``, the test is skipped (cloud chat keys often do
-not authorize ``/api/embed``; local runs need ``ollama pull nomic-embed-text``).
+Uses :func:`~src.embeddings.resolve_embed_client` (cloud first, then local).
+If no endpoint works, the test is skipped.
 
 Run explicitly with::
 
@@ -16,23 +14,19 @@ Run explicitly with::
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
 from dotenv import load_dotenv
-from ollama import Client
 
 from src.analyzer import analyze
 from src.chunk_store import load_chunk_store, save_chunk_store
-from src.embeddings import DEFAULT_EMBED_MODEL, embed_query
-from src.ollama_client import API_KEY_ENV, OLLAMA_CLOUD_HOST, build_cloud_client
+from src.embeddings import DEFAULT_EMBED_MODEL, EmbeddingUnavailableError, resolve_embed_client
 from src.pdf_reader import read_pdf
 from src.retrieval import index_paper, search
 
 load_dotenv()
 
-LOCAL_OLLAMA_HOST = "http://127.0.0.1:11434"
 PDF_PATH = Path(__file__).resolve().parents[2] / "data" / "AttentionIsAllYouNeed.pdf"
 
 BLEU_QUERY = (
@@ -41,30 +35,11 @@ BLEU_QUERY = (
 )
 
 
-def _resolve_embed_client() -> Client:
-    """Return the first Ollama client that can embed with ``nomic-embed-text``."""
-    errors: list[str] = []
-
-    if os.environ.get(API_KEY_ENV):
-        cloud_client = build_cloud_client()
-        try:
-            embed_query("connectivity check", client=cloud_client)
-            return cloud_client
-        except Exception as exc:
-            status = getattr(exc, "status_code", None)
-            errors.append(f"cloud ({OLLAMA_CLOUD_HOST}): {status or exc}")
-
-    local_client = Client(host=LOCAL_OLLAMA_HOST)
-    try:
-        embed_query("connectivity check", client=local_client)
-        return local_client
-    except Exception as exc:
-        status = getattr(exc, "status_code", None)
-        errors.append(f"local ({LOCAL_OLLAMA_HOST}): {status or exc}")
-
-
 def test_live_index_and_search_finds_bleu_in_results_section(tmp_path):
-    client = _resolve_embed_client()
+    try:
+        client = resolve_embed_client()
+    except EmbeddingUnavailableError as exc:
+        pytest.skip(str(exc))
 
     full_text, page_count = read_pdf(PDF_PATH)
     paper = analyze(
