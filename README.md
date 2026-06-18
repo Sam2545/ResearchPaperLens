@@ -116,8 +116,11 @@ Alternatively, export it in your shell:
 export OLLAMA_API_KEY=your_api_key
 ```
 
-The key is only required when running with `--summarize` or `--summarize-full`;
-the rest of the pipeline works without it.
+The key is required for `--summarize`, `--summarize-full`, and `--ask` (chat
+model). Embedding for `--index`, `--search`, and `--ask` uses Ollama cloud when
+authorized, otherwise a local Ollama daemon (`ollama pull nomic-embed-text`).
+Basic PDF analysis and `--search`/`--ask` against an existing index work without
+re-indexing the paper.
 
 ## Usage
 
@@ -180,7 +183,51 @@ See all options with `python main.py --help`.
 > - **`--ask`** — RAG Q&A: retrieves top-k chunks, sends them as context to the
 >   Ollama cloud model, and prints an answer with section citations and source
 >   chunk ids. Requires `OLLAMA_API_KEY` for the chat model and a working embed
->   endpoint (same as `--index`).
+>   endpoint (same as `--index`). The **answer appears right after the question
+>   line**; `Citations` and `Sources` are metadata at the bottom. This is **not**
+>   the same structured summary card as `--summarize`.
+
+### Retrieval and RAG workflow
+
+Indexing is **not** automatic. Only `--index` (re)builds the chunk file; other
+commands load the saved index from `--from`.
+
+```bash
+# 1. Index once (slow — embeds all chunks, overwrites .chunks.json)
+python main.py data/AttentionIsAllYouNeed.pdf --index
+
+# 2. Search or ask many times (fast — only embeds your query)
+python main.py --search "What BLEU scores were reported?" \
+  --from outputs/AttentionIsAllYouNeed.chunks.json
+python main.py --ask "How does multi-head attention work?" \
+  --from outputs/AttentionIsAllYouNeed.chunks.json
+```
+
+For indexing, hybrid chunking uses **Abstract + top-level numbered sections**
+(no Preamble). Sections ≤ 1,200 words stay whole; longer sections are split into
+1,200-word chunks with 150-word overlap.
+
+### Command output at a glance
+
+| Command | What you get |
+|---------|----------------|
+| `--summarize` / `--summarize-full` | Structured **summary card** (TL;DR, Problem, Approach, Key results, …) |
+| `--search` | Ranked **chunk snippets** with scores — no synthesized answer |
+| `--ask` | **Plain-English answer** to your question + Citations + Sources |
+
+Example `--ask` terminal layout:
+
+```
+Question: "What BLEU scores were reported?"
+
+The Transformer achieved 28.4 BLEU on English-German WMT 2014.   ← answer here
+
+Citations:
+  - 6 Results
+
+Sources:
+  - AttentionIsAllYouNeed:6-results:0
+```
 
 You can also use the pieces directly in Python:
 
@@ -294,6 +341,8 @@ otherwise its fields stay empty. Its fields are:
   `--summarize-full` for full-paper coverage (at the cost of more API calls).
 - `--summarize-full` makes one API call per chunk plus a final merge call; long
   papers take longer and cost more than `--summarize`.
+- `--ask` answers from retrieved excerpts only; quality depends on chunking and
+  retrieval. Use `--top-k` to retrieve more chunks if answers miss key sections.
 
 ## Tests
 
