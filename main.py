@@ -17,6 +17,7 @@ from src.chunk_store import (
 from src.embeddings import resolve_embed_client
 from src.paper import ResearchPaper
 from src.pdf_reader import read_pdf
+from src.rag import ask_store, format_rag_answer
 from src.retrieval import index_paper, search
 from src.storage import load_paper, save_paper
 from src.summarizer import DEFAULT_MODEL, summarize, summarize_full
@@ -172,8 +173,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--model",
         default=DEFAULT_MODEL,
         help=(
-            "Ollama cloud model used for --summarize or --summarize-full "
-            "(default: %(default)s). Ignored without a summarize flag."
+            "Ollama cloud model for --summarize, --summarize-full, or --ask "
+            "(default: %(default)s)."
         ),
     )
     parser.add_argument(
@@ -194,6 +195,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         metavar="QUERY",
         default=None,
         help="Semantic search query against an existing chunk index (--from required).",
+    )
+    parser.add_argument(
+        "--ask",
+        metavar="QUESTION",
+        default=None,
+        help="RAG question answered from retrieved chunk context (--from required).",
     )
     parser.add_argument(
         "--from",
@@ -251,6 +258,28 @@ def format_summary(paper: ResearchPaper) -> str:
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
+
+    if args.search is not None and args.ask is not None:
+        print("error: --search and --ask are mutually exclusive", file=sys.stderr)
+        raise SystemExit(2)
+
+    if args.ask is not None:
+        if not args.chunk_store:
+            print("error: --ask requires --from <chunk-index.json>", file=sys.stderr)
+            raise SystemExit(2)
+        if args.top_k < 1:
+            print("error: --top-k must be at least 1", file=sys.stderr)
+            raise SystemExit(2)
+        embed_client = resolve_embed_client()
+        result = ask_store(
+            args.chunk_store,
+            args.ask,
+            model=args.model,
+            top_k=args.top_k,
+            embed_client=embed_client,
+        )
+        print(format_rag_answer(result))
+        return
 
     if args.search is not None:
         if not args.chunk_store:

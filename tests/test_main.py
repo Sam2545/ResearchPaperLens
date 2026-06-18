@@ -259,3 +259,53 @@ def test_format_search_results_includes_section_and_score():
     assert "6 Results" in text
     assert "0.9123" in text
     assert "paper:6-results:0" in text
+
+
+def test_parse_args_ask_flag():
+    args = parse_args(["--ask", "What is BLEU?", "--from", "outputs/paper.chunks.json"])
+    assert args.ask == "What is BLEU?"
+    assert args.chunk_store == "outputs/paper.chunks.json"
+
+
+def test_main_ask_requires_from(capsys):
+    with pytest.raises(SystemExit) as exc:
+        main_module.main(["--ask", "What is BLEU?"])
+    assert exc.value.code == 2
+    assert "--from" in capsys.readouterr().err
+
+
+def test_main_search_and_ask_are_mutually_exclusive(capsys):
+    with pytest.raises(SystemExit) as exc:
+        main_module.main(
+            [
+                "--search",
+                "BLEU",
+                "--ask",
+                "What is BLEU?",
+                "--from",
+                "outputs/paper.chunks.json",
+            ]
+        )
+    assert exc.value.code == 2
+    assert "mutually exclusive" in capsys.readouterr().err
+
+
+def test_main_ask_prints_rag_answer(monkeypatch, capsys):
+    from src.rag import RagAnswer
+
+    def fake_ask_store(*args, **kwargs):
+        return RagAnswer(
+            question="What is BLEU?",
+            answer="BLEU was 28.4.",
+            citations=["6 Results"],
+            sources=["paper:6-results:0"],
+        )
+
+    monkeypatch.setattr(main_module, "resolve_embed_client", lambda: object())
+    monkeypatch.setattr(main_module, "ask_store", fake_ask_store)
+    main_module.main(
+        ["--ask", "What is BLEU?", "--from", "outputs/paper.chunks.json"]
+    )
+    out = capsys.readouterr().out
+    assert "BLEU was 28.4" in out
+    assert "6 Results" in out

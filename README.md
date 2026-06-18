@@ -8,11 +8,10 @@ result as clean JSON.
 ## Current Phase
 
 ResearchPaperLens extracts structured metadata from research-paper PDFs, saves
-the result as JSON, and can optionally generate an LLM summary and key insights
-using an Ollama cloud model (opt-in via `--summarize` or `--summarize-full`).
+the result as JSON, optionally generates an LLM summary, and supports semantic
+retrieval plus RAG Q&A over indexed paper chunks.
 
-It does not currently perform RAG Q&A or web deployment. Those capabilities are
-planned for later phases.
+Web deployment is not implemented yet.
 
 ## Features
 
@@ -34,6 +33,8 @@ planned for later phases.
 - Semantic retrieval: hybrid-chunk embeddings via Ollama (`nomic-embed-text`),
   per-paper chunk JSON stores, in-memory cosine search, CLI `--index` /
   `--search`
+- RAG Q&A: retrieve top-k chunks, answer questions with Ollama cloud (`--ask`),
+  with section citations and source chunk ids
 - Saves structured results as JSON
 - Includes unit and integration tests
 
@@ -53,6 +54,7 @@ The pipeline is split into focused, independently testable modules:
 │   ├── chunk_store.py  # Indexed chunks + JSON persistence
 │   ├── vector_index.py # In-memory cosine similarity search
 │   ├── retrieval.py    # index_paper() and search() orchestration
+│   ├── rag.py          # RAG Q&A over retrieved chunks
 │   ├── summarizer.py   # LLM summarizer (Ollama cloud): summary/key_insights
 │   └── storage.py      # Serialize ResearchPaper <-> JSON
 ├── data/               # Input PDFs
@@ -150,6 +152,10 @@ python main.py --search "What BLEU scores were reported?" \
 # Show more search hits
 python main.py --search "multi-head attention" \
   --from outputs/AttentionIsAllYouNeed.chunks.json --top-k 10
+
+# Ask a grounded question (retrieve + Ollama cloud answer)
+python main.py --ask "How does multi-head attention work?" \
+  --from outputs/AttentionIsAllYouNeed.chunks.json
 ```
 
 See all options with `python main.py --help`.
@@ -171,6 +177,10 @@ See all options with `python main.py --help`.
 >   local Ollama daemon (run `ollama pull nomic-embed-text`).
 > - **`--search`** — loads a chunk index from `--from` and prints ranked matches
 >   (section, score, text snippet). Does not require a PDF argument.
+> - **`--ask`** — RAG Q&A: retrieves top-k chunks, sends them as context to the
+>   Ollama cloud model, and prints an answer with section citations and source
+>   chunk ids. Requires `OLLAMA_API_KEY` for the chat model and a working embed
+>   endpoint (same as `--index`).
 
 You can also use the pieces directly in Python:
 
@@ -193,14 +203,16 @@ save_paper(paper, "outputs/paper.json")
 paper = load_paper("outputs/paper.json")  # round-trips back into a ResearchPaper
 ```
 
-### Semantic retrieval (CLI or library)
+### Semantic retrieval and RAG (CLI or library)
 
-Index hybrid chunks (Abstract + numbered sections) and search them in memory.
-Chunk indexes are saved as `outputs/<pdf-stem>.chunks.json`.
+Index hybrid chunks (Abstract + numbered sections), search them, or ask
+grounded questions. Chunk indexes are saved as `outputs/<pdf-stem>.chunks.json`.
 
 ```bash
 python main.py data/AttentionIsAllYouNeed.pdf --index
 python main.py --search "What BLEU scores were reported?" \
+  --from outputs/AttentionIsAllYouNeed.chunks.json
+python main.py --ask "What BLEU scores were reported?" \
   --from outputs/AttentionIsAllYouNeed.chunks.json
 ```
 
@@ -210,14 +222,15 @@ Or from Python:
 from src.retrieval import index_paper, search
 from src.embeddings import resolve_embed_client
 from src.chunk_store import save_chunk_store, default_chunk_store_path
+from src.rag import ask, format_rag_answer
 
 client = resolve_embed_client()
 store = index_paper(paper, client=client)
 save_chunk_store(store, default_chunk_store_path(paper))
 
 results = search(store, "What BLEU scores were reported?", client=client, top_k=3)
-for hit in results:
-    print(hit.score, hit.chunk.section_heading)
+answer = ask(store, "What BLEU scores were reported?", embed_client=client, top_k=5)
+print(format_rag_answer(answer))
 ```
 
 ## Output format
@@ -302,3 +315,4 @@ call a real Ollama cloud model and are skipped automatically unless
 - `tests/integration/test_summarizer_full_live_api.py` — chunked `--summarize-full`
 - `tests/integration/test_retrieval_live_api.py` — hybrid-chunk indexing + semantic search
   (cloud embed when authorized, otherwise local `nomic-embed-text`)
+- `tests/integration/test_rag_live_api.py` — RAG Q&A over indexed chunks
